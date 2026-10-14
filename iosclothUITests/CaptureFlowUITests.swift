@@ -161,6 +161,31 @@ final class CaptureFlowUITests: XCTestCase {
         )
     }
 
+    /// 「保存并结束」必须**退出整个录入流程**，不能回到相机。
+    ///
+    /// 这里防的是一类很低级但很烦人的错误：外壳把回调写成了恒定的
+    /// `onSaved(true)`，于是两个保存按钮的语义完全一样 —— 不管点哪个都回相机。
+    func testSaveAndFinishExitsFlowInsteadOfReturningToCamera() throws {
+        let app = launchApp()
+
+        openCaptureEntry(app)
+        pickFirstPhotoFromLibrary(app)
+        confirmCrop(app)
+        fillName(app, "结束测试")
+
+        dismissKeyboard(app)
+        tapSave(app, "保存并结束")
+
+        // 回到衣柜
+        XCTAssertTrue(app.navigationBars["衣柜"].waitForExistence(timeout: 20), "应该回到衣柜")
+        XCTAssertTrue(app.staticTexts["结束测试"].waitForExistence(timeout: 20), "衣物应该已保存")
+
+        // 关键：整个录入流程都关掉了 —— 入口页和相机都不该还在
+        XCTAssertFalse(app.buttons["拍照"].exists, "不该回到录入入口页")
+        XCTAssertFalse(app.buttons["Take Picture"].exists, "更不该回到相机")
+        XCTAssertFalse(app.buttons["从相册选"].exists)
+    }
+
     // MARK: - 取消不该留下垃圾数据
 
     func testCancellingFromEntryLeavesNoItem() throws {

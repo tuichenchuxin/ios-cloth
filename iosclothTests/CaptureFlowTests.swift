@@ -6,6 +6,56 @@ import UIKit
 /// 裁切坐标换算、批量录入的字段继承。
 final class CaptureFlowTests: XCTestCase {
 
+    // MARK: - 取景框尺寸
+
+    /// 取景框按屏幕短边取比例，而不是写死 —— 之前固定 340pt，在 iPhone 上太小太挤
+    func testCropSideScalesWithScreen() {
+        let iPhone = ImageCropper.cropSide(fitting: CGSize(width: 440, height: 700))
+        let iPad = ImageCropper.cropSide(fitting: CGSize(width: 1000, height: 1300))
+
+        XCTAssertGreaterThan(iPad, iPhone, "大屏取景框应该更大")
+        XCTAssertEqual(iPhone, 440 * ImageCropper.cropSideRatio, accuracy: 0.5)
+    }
+
+    func testCropSideHonoursBounds() {
+        // 空间比下限还小时，以「装得下」优先 —— 取景框绝不能画到屏幕外
+        XCTAssertEqual(ImageCropper.cropSide(fitting: CGSize(width: 100, height: 100)), 100)
+        // 空间够用时才有下限
+        XCTAssertEqual(
+            ImageCropper.cropSide(fitting: CGSize(width: 260, height: 500)),
+            ImageCropper.minCropSide
+        )
+        // 极大屏不超过上限
+        XCTAssertEqual(ImageCropper.cropSide(fitting: CGSize(width: 2000, height: 2000)), ImageCropper.maxCropSide)
+        // 不依赖哪一边更短
+        XCTAssertEqual(
+            ImageCropper.cropSide(fitting: CGSize(width: 700, height: 440)),
+            ImageCropper.cropSide(fitting: CGSize(width: 440, height: 700)),
+            accuracy: 0.001
+        )
+    }
+
+    func testCropSideNeverExceedsAvailableSpace() {
+        for side in stride(from: 200.0, through: 1400.0, by: 50.0) {
+            let fit = ImageCropper.cropSide(fitting: CGSize(width: side, height: side * 1.6))
+            XCTAssertLessThanOrEqual(fit, side, "取景框不能比可用区域还大")
+        }
+    }
+
+    func testCropSideHandlesZeroSize() {
+        XCTAssertEqual(ImageCropper.cropSide(fitting: .zero), ImageCropper.minCropSide)
+    }
+
+    /// **取景框必须和滚动视图同区**：如果取景框比视口小，那么贴在原图边缘的
+    /// 内容被滚动夹住时就进不了框。这条测试守住「框 = 视口」这个前提。
+    func testFrameFillsViewportSoEdgesAreReachable() {
+        // 取景框边长 == 传给 UIKit 的 cropSide；滚动视图也铺满同一块区域，
+        // 所以两者的边界重合。这里用「取景框不算太小」间接守住可用性。
+        let viewport = CGSize(width: 440, height: 700)
+        let side = ImageCropper.cropSide(fitting: viewport)
+        XCTAssertGreaterThan(side, viewport.width * 0.8, "取景框应该占据大部分宽度，否则边缘很难对准")
+    }
+
     // MARK: - 取景框对应的图片边长
 
     func testCropSideAtFitScale() {

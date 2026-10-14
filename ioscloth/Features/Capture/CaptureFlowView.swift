@@ -110,6 +110,21 @@ struct CaptureFlowView: View {
         }
     }
 
+    /// 结束整个录入流程。
+    ///
+    /// **必须等当前模态收干净**，不能直接 `onFinish()`：外层还有一个
+    /// `fullScreenCover`，同时关「内层 sheet」和「外层 cover」会让 SwiftUI
+    /// 把两者一起丢掉（表现为流程没退出去、或者界面错乱）。
+    /// 这和 `enter(_:)` 里那个 400ms 是同一个道理。
+    private func finishFlow() {
+        scene = .idle
+        captured = nil
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            onFinish()
+        }
+    }
+
     // MARK: - 入口页
 
     private var entryScreen: some View {
@@ -252,7 +267,8 @@ struct CaptureFlowView: View {
                         case .library: startLibrary()
                         }
                     } else {
-                        enter(.idle)
+                        // 「保存并结束」= 退出整个录入流程（不是回到入口页）
+                        finishFlow()
                     }
                 },
                 onCancel: { enter(.idle) }

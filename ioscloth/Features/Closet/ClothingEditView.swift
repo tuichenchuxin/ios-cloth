@@ -56,7 +56,11 @@ struct ClothingEditView: View {
                 seed: $browseDraft,
                 saveRequest: $saveRequest,
                 deleteRequest: $deleteRequest,
-                onSave: { onSaved(true) }
+                onSave: { request in
+                    // 之前这里写成了恒定的 onSaved(true)，导致「保存并结束」
+                    // 也被当成「保存并继续」处理，于是永远回到相机。
+                    onSaved(request == .continueBatch)
+                }
             )
             .navigationTitle(clothing == nil ? "添加衣物" : "编辑衣物")
             .navigationBarTitleDisplayMode(.inline)

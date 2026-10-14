@@ -1,22 +1,27 @@
 import SwiftUI
 import UIKit
 
-/// 裁切照片：中间一个固定正方形取景框，图片在下面缩放平移。
+/// 裁切照片：中间一个正方形取景框，图片在下面缩放平移。
 ///
 /// 交互目标是最短路径：打开就已经居中放好、放大到刚好填满取景框，
 /// 用户直接点「完成」就行。想微调就双指缩放、拖动。
 ///
-/// ## 两个关键设计（都踩过坑，改之前先读）
+/// ## 三个关键设计（都踩过坑，改之前先读）
 ///
 /// **1. 屏幕上永远只用缩略图。**
-///    相机原图动辄 4000×3000。直接交给界面按 340pt 绘制，每个手势帧都要
+///    相机原图动辄 4000×3000。直接交给界面按取景框大小绘制，每个手势帧都要
 ///    重采样一张 1200 万像素的图，表现就是「进裁切页慢、拖动卡」。
 ///    所以先生成一张长边 1200px 的预览图（在主线程外），界面只画它；
 ///    点「完成」时再把裁切矩形按比例映射回原图，切出全分辨率结果。
 ///
-/// **2. 缩放平移和裁切矩形都交给 UIKit。**
-///    自己用 SwiftUI 手势算会踩坐标系坑（见 `ZoomableCropView` 的注释），
-///    自己从 `contentOffset` 推裁切矩形也算错过（被单测抓到）。
+/// **2. 缩放平移交给 UIKit 的 `UIScrollView`，不自己写手势。**
+///    `MagnifyGesture` 的 `startAnchor` 报的是被缩放后的图片坐标系，
+///    拿它当容器坐标做锚定，补偿量全错 —— 表现是「无论捏哪里取景框都往同一方向漂」。
+///
+/// **3. 滚动视图必须铺满整块可用区域，取景框只是画在它上面的一层。**
+///    如果滚动视图缩在取景框那么大的一块里，「滚动夹住的边界」和
+///    「取景框的边界」就不是同一条线，贴着原图边缘的内容永远拖不进框里。
+///    两者同区之后，拖到头的时刻正好是该方向的内容贴住取景框边。
 struct ImageCropper: View {
     let image: UIImage
     /// 回调裁切结果
@@ -24,13 +29,14 @@ struct ImageCropper: View {
     /// 取消
     let onCancel: () -> Void
 
-    /// 预览图长边像素。1200 是为了在 3× 屏上画 340pt 仍清晰（约 1020px），
-    /// 同时小到足以让手势全程流畅。
+    /// 预览图长边像素。1200 是为了在 3× 屏上画取景框仍清晰，同时小到足以让手势流畅。
     static let previewMaxDimension: CGFloat = 1200
-    /// 取景框最大边长（正方形：衣服拍出来基本都是竖着的主体）
-    static let maxCropSide: CGFloat = 340
-    /// 取景框与屏幕边缘的间距
-    static let cropSidePadding: CGFloat = 12
+    /// 取景框占可用短边的比例
+    static let cropSideRatio: CGFloat = 0.88
+    /// 取景框边长下限。太小的话放大后能看到的范围太窄，很难对准细节。
+    static let minCropSide: CGFloat = 240
+    /// 取景框边长上限（iPad 上不至于占满整屏）
+    static let maxCropSide: CGFloat = 520
 
     /// 原图（方向已拍平）。裁切结果取自它，所以不损失分辨率。
     @State private var original: UIImage?
@@ -38,9 +44,9 @@ struct ImageCropper: View {
     @State private var preview: UIImage?
     /// 取景框边长（由可用空间算出）
     @State private var cropSide: CGFloat = 300
-    /// 当前缩放平移（由 UIKit 上报）
+    /// 当前缩放平移（由 UIKit 上报的原始量）
     @State private var transform = CropTransform.identity
-    /// 「刚好填满取景框」的基准缩放倍数
+    /// 「刚好填满取景框」的基准缩放（由 UIKit 上报）
     @State private var fitScale: CGFloat = 0
 
     var body: some View {
@@ -71,51 +77,33 @@ struct ImageCropper: View {
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("完成") {
+                    // 刻意不 disable：按钮点了必须有反应。
+                    // 参数缺失时 `crop` 会退回原图，是可接受的降级，不该堵住主流程。
                     if let original, let preview {
-                        onDone(Self.crop(from: original, preview: preview, cropSide: cropSide, transform: transform, fitScale: fitScale))
+                        onDone(Self.crop(
+                            from: original,
+                            preview: preview,
+                            cropSide: cropSide,
+                            transform: transform,
+                            fitScale: fitScale
+                        ))
                     } else if let original {
                         onDone(original)
                     }
                 }
-                // 刻意不 disable：按钮点了必须有反应。
-                // 之前加了 `.disabled(fitScale <= 0)`，而 fitScale 是 UIKit 回调
-                // 异步上报的，一旦没上报到按钮就永远点不动 —— 用户直接卡死在这一页。
-                // 参数缺失时 `crop` 会退回原图，是可接受的降级，不该堵住主流程。
             }
         }
         .toolbarBackground(.black, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
     }
 
-    /// 最终裁切结果的像素尺寸提示，例如「裁切框 1024 × 1024」
-    private var resultSizeHint: String {
-        guard let preview, let original, fitScale > 0 else { return " " }
-        let sideInPreview = Self.cropSideInImage(
-            cropSide: cropSide,
-            zoomScale: transform.zoomScale,
-            fitScale: fitScale
-        )
-        let sideInOriginal = Self.scaleToOriginal(
-            sideInPreview,
-            previewSize: preview.size,
-            originalSize: original.size
-        )
-        guard sideInOriginal > 1 else { return " " }
-        return "将保存 \(Int(sideInOriginal)) × \(Int(sideInOriginal)) 像素"
-    }
-
     // MARK: - 编辑器
 
     private func editor(preview: UIImage) -> some View {
         VStack(spacing: 16) {
-            // 用 overlay 而不是 ZStack：取景框和滚动视图共用**同一个**几何源。
-            // 之前放 ZStack 里，滚动视图实际落在安全区内、比分配高度矮约 32pt，
-            // 结果取景框中心与图片视觉中心错开，看起来「没居中」。
+            // 滚动视图铺满整块可用区域，取景框是覆盖在它上面的一层（见顶部设计说明 3）
             GeometryReader { geometry in
-                let side = min(
-                    min(geometry.size.width, geometry.size.height) - Self.cropSidePadding * 2,
-                    Self.maxCropSide
-                )
+                let side = Self.cropSide(fitting: geometry.size)
 
                 ZoomableCropView(
                     image: preview,
@@ -133,7 +121,8 @@ struct ImageCropper: View {
             VStack(spacing: 2) {
                 Text("双指缩放，单指拖动。直接点「完成」也行。")
                     .font(.footnote)
-                // 让用户（和自己排查问题时）知道最终会存下多大的一块
+                // 让用户（和自己排查问题时）知道最终会存下多大的一块。
+                // 它同时是最好的调试手段：派生量不变就说明某个输入没接进公式。
                 Text(resultSizeHint)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -141,11 +130,48 @@ struct ImageCropper: View {
             .foregroundStyle(.secondary)
         }
     }
+
+    /// 最终裁切结果的像素尺寸提示，例如「将保存 1024 × 1024 像素」
+    private var resultSizeHint: String {
+        guard let preview, let original, fitScale > 0 else { return " " }
+        let sideInPreview = Self.cropSideInImage(
+            cropSide: cropSide,
+            zoomScale: transform.zoomScale,
+            fitScale: fitScale
+        )
+        let sideInOriginal = Self.scaleToOriginal(
+            sideInPreview,
+            previewSize: preview.size,
+            originalSize: original.size
+        )
+        guard sideInOriginal > 1 else { return " " }
+        return "将保存 \(Int(sideInOriginal)) × \(Int(sideInOriginal)) 像素"
+    }
+}
+
+/// `UIScrollView` 当前的变换状态。三个量都是 UIKit 直接给的原始值，不做任何推演。
+struct CropTransform: Equatable {
+    var zoomScale: CGFloat = 0
+    var contentOffset: CGPoint = .zero
+    var viewportSize: CGSize = .zero
+
+    static let identity = CropTransform()
 }
 
 // MARK: - 裁切换算（纯函数，便于单测）
 
 extension ImageCropper {
+    /// 取景框边长：占可用短边的固定比例，并夹在上下限之间。
+    ///
+    /// 之前写死 340pt，在 iPhone 上显得又小又挤，贴近原图边缘的内容很难塞进去。
+    static func cropSide(fitting available: CGSize) -> CGFloat {
+        let shortSide = min(available.width, available.height)
+        guard shortSide > 0 else { return minCropSide }
+        let preferred = min(max(shortSide * cropSideRatio, minCropSide), maxCropSide)
+        // 下限也不能突破可用空间：极小屏上取景框比可视区还大会画到屏幕外
+        return min(preferred, shortSide)
+    }
+
     /// 取景框在**图片像素**里对应的边长。
     ///
     /// 取景框固定不动、图片被缩放，所以取景框覆盖的屏幕宽度
@@ -162,8 +188,7 @@ extension ImageCropper {
 
     /// 取景框在**图片像素**里对应的矩形。
     ///
-    /// 三个量全部由 `UIScrollView` 直接给出（缩放、contentOffset、可视尺寸），
-    /// 这里只做一次线性换算：屏幕中心 → 图片坐标。
+    /// 三个量全部由 `UIScrollView` 直接给出，这里只做一次线性换算：屏幕中心 → 图片坐标。
     ///
     /// 推导：内容坐标 `c` 在滚动视图上的位置是 `c - contentOffset`，
     /// 所以可视区中心（`viewportSize / 2`）对应的图片坐标是
@@ -235,15 +260,6 @@ extension ImageCropper {
         guard let cropped = cgImage.cropping(to: rect) else { return original }
         return UIImage(cgImage: cropped, scale: original.scale, orientation: .up)
     }
-}
-
-/// `UIScrollView` 当前的变换状态。三个量都是 UIKit 直接给的原始值。
-struct CropTransform: Equatable {
-    var zoomScale: CGFloat = 0
-    var contentOffset: CGPoint = .zero
-    var viewportSize: CGSize = .zero
-
-    static let identity = CropTransform()
 }
 
 // MARK: - 取景框

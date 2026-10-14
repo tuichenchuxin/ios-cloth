@@ -22,8 +22,8 @@ struct ClothingForm: View {
     let capturedImage: UIImage?
     /// 新建时的初始值（批量录入靠它继承上一件的季节/温度/场景）
     @Binding var seed: ClothingEditView.Draft
-    /// 保存成功
-    let onSave: () -> Void
+    /// 保存成功。参数是用户点的那个按钮 —— 外层据此决定是继续录入还是结束。
+    let onSave: (ClothingEditView.SaveRequest) -> Void
     /// 外层工具栏发来的保存请求
     @Binding var saveRequest: ClothingEditView.SaveRequest?
     /// 外层工具栏发来的删除请求
@@ -44,7 +44,7 @@ struct ClothingForm: View {
         seed: Binding<ClothingEditView.Draft>,
         saveRequest: Binding<ClothingEditView.SaveRequest?>,
         deleteRequest: Binding<Bool>,
-        onSave: @escaping () -> Void
+        onSave: @escaping (ClothingEditView.SaveRequest) -> Void
     ) {
         self.clothing = clothing
         self.capturedImage = capturedImage
@@ -93,7 +93,7 @@ struct ClothingForm: View {
         .onChange(of: saveRequest) { _, newValue in
             guard let newValue else { return }
             saveRequest = nil
-            Task { await save(continueBatch: newValue == .continueBatch) }
+            Task { await save(request: newValue) }
         }
         .onChange(of: deleteRequest) { _, newValue in
             guard newValue else { return }
@@ -317,7 +317,7 @@ struct ClothingForm: View {
         }
     }
 
-    private func save(continueBatch: Bool = true) async {
+    private func save(request: ClothingEditView.SaveRequest) async {
         isSaving = true
         defer { isSaving = false }
 
@@ -348,7 +348,8 @@ struct ClothingForm: View {
 
         // 把这次填的值交回给外层，供下一件继承
         seed = draft
-        onSave()
+        // 原样转达用户的选择：是「保存并继续」还是「保存并结束」
+        onSave(request)
     }
 
     private func deleteItem() {
@@ -363,6 +364,6 @@ struct ClothingForm: View {
             return
         }
         Task { await ImageStore.shared.deleteAll(main: main, thumb: thumb, cutout: cutout) }
-        onSave()
+        onSave(.finish)
     }
 }
