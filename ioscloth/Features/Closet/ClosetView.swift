@@ -11,6 +11,8 @@ struct ClosetView: View {
     @State private var isCapturing = false
     @State private var isAddingBlank = false
     @State private var editingItem: Clothing?
+    /// 单独新增/编辑时不需要继承上一件，给个空草稿即可
+    @State private var blankSeed = ClothingEditView.Draft()
 
     private let columns = [GridItem(.adaptive(minimum: 108), spacing: 12)]
 
@@ -38,10 +40,19 @@ struct ClosetView: View {
                 CaptureFlowView { isCapturing = false }
             }
             .sheet(isPresented: $isAddingBlank) {
-                ClothingEditView(mode: .singlePhoto)
+                ClothingEditView(
+                    seed: $blankSeed,
+                    onSaved: { _ in isAddingBlank = false },
+                    onCancel: { isAddingBlank = false }
+                )
             }
             .sheet(item: $editingItem) { item in
-                ClothingEditView(clothing: item, mode: .editing)
+                ClothingEditView(
+                    clothing: item,
+                    seed: $blankSeed,
+                    onSaved: { _ in editingItem = nil },
+                    onCancel: { editingItem = nil }
+                )
             }
         }
     }

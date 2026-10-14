@@ -14,20 +14,35 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# 从 `devicectl list devices` 的输出里挑出第一台可用设备的 UDID。
+# 只有在整行不含 unavailable 时才认为可用 —— 这样不会把 `unavailable` 误判成 `available`。
+device_udid() {
+  awk '
+    /unavailable/ { next }
+    match($0, /[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}/) {
+      print substr($0, RSTART, RLENGTH)
+      exit
+    }
+  '
+}
+
+
 BUNDLE_ID="com.chuxinchen.ioscloth"
 
 echo "==> 找设备…"
-# 取第一台已连接的 iPhone；也可以手动改成具体 UDID
-DEVICE_ID=$(xcrun devicectl list devices 2>/dev/null \
-  | grep -iE "iPhone" \
-  | grep -iE "connected|available" \
-  | head -1 \
-  | awk '{print $3}')
+# 设备探测有几个坑，所以写得啰嗦一点：
+#   1. devicectl list 会把「记得但已离线 / 没配对」的旧设备也列出来，状态是 unavailable；
+#   2. 状态的原始字符串可能是 `available`、`available (paired)`、`connected`；
+#   3. `unavailable` 里面含有 `available`，简单 grep available 会挑中不可用的设备。
+DEVICE_ID=$(xcrun devicectl list devices 2>/dev/null | device_udid)
 
 if [ -z "${DEVICE_ID:-}" ]; then
-  echo "❌ 没找到已连接的 iPhone。"
+  echo "❌ 没找到可用的 iPhone。当前设备列表："
+  xcrun devicectl list devices
+  echo
   echo "   检查：数据线插好、手机解锁、信任此电脑。"
-  echo "   查看全部设备：xcrun devicectl list devices"
+  echo "   如果状态是 unavailable，多半是还没配对："
+  echo "     xcrun devicectl manage pair --device <UDID>"
   exit 1
 fi
 echo "    设备：$DEVICE_ID"

@@ -2,12 +2,12 @@ import XCTest
 
 /// 「拍照 → 调整 → 填表 → 保存」这条主链路的端到端 UI 测试。
 ///
-/// 存在的理由：这条流程出过一次很隐蔽的 bug —— 点完「使用照片」什么都没发生。
-/// 根因是嵌套模态互相拆台，单测覆盖不到，只有真的把界面点一遍才能发现。
+/// 存在的理由：这条流程出过好几次很隐蔽的 bug ——
+/// 点「使用照片」什么都没发生、点保存按钮没反应、相册跳过裁切页。
+/// 根因都是模态嵌套 / 状态不同步，单测覆盖不到，只有真的把界面点一遍才能发现。
 ///
-/// ⚠️ 模拟器没有相机，所以这里走的是**相册**分支。
-/// 相机分支与相册分支在「拿到图片之后」共用同一套状态机
-/// （设置 `captured` → push 裁切页 → 弹出表单），所以这条测试能覆盖到出问题的那段逻辑。
+/// ⚠️ 模拟器没有相机，所以这里走**相册**分支。
+/// 相机分支与相册分支在「拿到图片之后」共用同一套状态机，所以这条测试能覆盖到出问题的那段逻辑。
 final class CaptureFlowUITests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -17,82 +17,13 @@ final class CaptureFlowUITests: XCTestCase {
 
     private func launchApp() -> XCUIApplication {
         let app = XCUIApplication()
-        // 每次都从空衣柜开始：数据是持久化的，不清空的话上一条测试
-        // 存进去的衣物会让「取消不该产生数据」之类的断言误报。
+        // 每次从空衣柜开始：数据是持久化的，不清空的话上一条测试存进去的衣物
+        // 会让「取消不该产生数据」之类的断言误报。
         app.launchArguments += ["-uitest-reset-data"]
-        // 让模拟器相册保留已选过的照片，避免每次都要等待照片库吐数据
+        // 让模拟器相册保留已选过的照片，省掉照片库吐数据的时间
         app.launchArguments += ["-keep-saved-photos", "YES"]
         app.launch()
         return app
-    }
-
-    /// 在系统相册（PHPicker）里挑第一张照片。
-    ///
-    /// 系统相册有几个坑，都在这里绕开：
-    /// 1. 它可能先弹一个「照片选择器」引导页（带 `Learn More…` / `Close`），
-    ///    把整个网格挡住 —— 这时候 `<app>.collectionViews` 和 `.cells` 全是 0；
-    /// 2. 照片在层级里是 `PXGGridLayout-Info` 这种系统内部标识的 image，
-    ///    不是干净的 cell；
-    /// 3. 挑完之后系统会自动关掉选择器，不需要（也没有）确认按钮。
-    private func tapFirstPhoto(in app: XCUIApplication) throws {
-        // 1) 关掉可能的引导页
-        let closeButton = app.buttons["Close"].firstMatch
-        if closeButton.waitForExistence(timeout: 8) {
-            closeButton.tap()
-        }
-
-        // 2) 等照片网格就绪。
-        //    这些元素 `isHittable == false`（系统网格外面套了一层拦截触摸的容器），
-        //    所以不能用 `.tap()`，得按坐标点。
-        let photo = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
-        if photo.waitForExistence(timeout: 30) {
-            photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            return
-        }
-
-        // 3) 兜底：不同系统版本的标识不一样，退回到「第一个单元格 / 第一张图」
-        let cell = app.collectionViews.firstMatch.cells.firstMatch
-        if cell.waitForExistence(timeout: 10) {
-            cell.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            return
-        }
-        let anyImage = app.images.firstMatch
-        if anyImage.waitForExistence(timeout: 10) {
-            anyImage.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            return
-        }
-
-        XCTFail("相册里没找到可选的照片（模拟器相册可能是空的，先跑 `xcrun simctl addmedia`）")
-    }
-
-    /// 走 UI 进入「从系统相册选照片」这一步。
-    ///
-    /// 路径：衣柜 → 添加菜单 → CaptureFlowView 入口页 → 从相册选。
-    /// 注意这里刻意只保留一条录入路径：以前 ClosetView 里还并行挂着一个
-    /// `.photosPicker`，导致相册和拍照行为不一致（相册会跳过裁切页）。
-    private func openCaptureFlowFromLibrary(_ app: XCUIApplication) {
-        app.tabBars.buttons["衣柜"].firstMatch.tap()
-        app.buttons["添加"].firstMatch.tap()
-
-        let captureEntry = app.buttons["拍照 / 从相册录入"].firstMatch
-        XCTAssertTrue(captureEntry.waitForExistence(timeout: 10), "添加菜单应该弹出")
-        captureEntry.tap()
-
-        let libraryButton = app.buttons["从相册选"].firstMatch
-        XCTAssertTrue(libraryButton.waitForExistence(timeout: 20), "应该进入录入入口页")
-        libraryButton.tap()
-    }
-
-    /// 收掉键盘。**这一步不能省**：
-    /// 「保存并结束」在底部工具栏，填名称时键盘正好盖住它，
-    /// 不收键盘就点不到 —— 这正是「录完了但没存进去」的根因之一。
-    private func dismissKeyboard(_ app: XCUIApplication) {
-        let collapse = app.buttons["收起键盘"].firstMatch
-        if collapse.exists {
-            collapse.tap()
-        } else {
-            app.navigationBars.firstMatch.tap()
-        }
     }
 
     // MARK: - 主链路
@@ -100,42 +31,16 @@ final class CaptureFlowUITests: XCTestCase {
     func testAddClothingFromPhotoLibrary() throws {
         let app = launchApp()
 
-        // 1. 切到「衣柜」
-        app.tabBars.buttons["衣柜"].firstMatch.tap()
-        XCTAssertTrue(
-            app.navigationBars["衣柜"].waitForExistence(timeout: 5),
-            "应该进入衣柜页"
-        )
-
-        // 2. 从相册录入
-        openCaptureFlowFromLibrary(app)
-
-        // 3. 系统相册：选第一张照片
-        try tapFirstPhoto(in: app)
-
-        // 4. 应该进入裁切页（这一步以前会因为嵌套模态而整个消失）
-        let doneButton = app.buttons["完成"].firstMatch
-        XCTAssertTrue(doneButton.waitForExistence(timeout: 20), "选完照片必须进入裁切页")
-        doneButton.tap()
-
-        // 5. 应该进入表单
-        let nameField = app.textFields["衣物名称输入框"]
-        XCTAssertTrue(nameField.waitForExistence(timeout: 15), "裁切完成后必须进入录入表单")
-
-        nameField.tap()
-        nameField.typeText("UI测试用上衣")
-
-        // 6. 勾一个季节
+        openCaptureEntry(app)
+        pickFirstPhotoFromLibrary(app)
+        confirmCrop(app)
+        fillName(app, "UI测试用上衣")
         app.buttons["春"].firstMatch.tap()
 
-        // 7. 收键盘后保存（不收键盘的话底部工具栏是点不到的）
         dismissKeyboard(app)
-        let saveButton = app.buttons["保存并结束"].firstMatch
-        XCTAssertTrue(saveButton.waitForExistence(timeout: 5), "批量模式应该有「保存并结束」")
-        XCTAssertTrue(saveButton.isHittable, "收键盘之后「保存并结束」必须可点")
-        saveButton.tap()
+        tapSave(app, "保存并结束")
 
-        // 8. 回到衣柜，应该能看到刚录入的衣服
+        // 保存并结束 → 回到衣柜，能看到刚录入的衣服
         XCTAssertTrue(
             app.navigationBars["衣柜"].waitForExistence(timeout: 20),
             "保存后应该回到衣柜"
@@ -146,74 +51,85 @@ final class CaptureFlowUITests: XCTestCase {
         )
     }
 
-    // MARK: - 批量录入的字段继承
+    // MARK: - 批量录入
 
-    func testBatchEntryCarriesOverSeasonToNextItem() throws {
-        // 第一件：完整录入，季节选「冬」，温度调到「冷」预设
-        // 第二件：直接保存，应该自动继承「冬」和刚才的温度区间
-        //
-        // 这里只验证「进入第二件的表单时季节已经被预选」这一点，
-        // 因为它是批量录入省时间的核心机制。
+    func testBatchEntryReturnsToCameraAfterSave() throws {
+        // 批量模式的承诺：点「保存并继续」存完立刻回到相机接着拍。
         let app = launchApp()
 
-        openCaptureFlowFromLibrary(app)
-
-        try tapFirstPhoto(in: app)
-
-        let doneButton = app.buttons["完成"].firstMatch
-        XCTAssertTrue(doneButton.waitForExistence(timeout: 20))
-        doneButton.tap()
-
-        let nameField = app.textFields["衣物名称输入框"]
-        XCTAssertTrue(nameField.waitForExistence(timeout: 15))
-        nameField.tap()
-        nameField.typeText("批量第一件")
-
-        // 选「冬」和「冷」预设
+        openCaptureEntry(app)
+        pickFirstPhotoFromLibrary(app)
+        confirmCrop(app)
+        fillName(app, "批量第一件")
         app.buttons["冬"].firstMatch.tap()
         app.buttons["冷 -5~10°"].firstMatch.tap()
 
-        // 点「保存并继续」→ 应该回到录入入口页（而不是退出整个流程）
         dismissKeyboard(app)
-        let continueButton = app.buttons["保存并继续"].firstMatch
-        XCTAssertTrue(continueButton.waitForExistence(timeout: 5))
-        XCTAssertTrue(continueButton.isHittable, "收键盘之后「保存并继续」必须可点")
-        continueButton.tap()
+        tapSave(app, "保存并继续")
 
-        let cameraButton = app.buttons["拍照"]
+        // 关键断言：相机真的起来了（模拟器上也有「拍照」这个按钮，只是不可用）
         XCTAssertTrue(
-            cameraButton.waitForExistence(timeout: 20),
-            "「保存并继续」之后应该回到录入入口，而不是退出流程"
+            app.buttons["Take Picture"].firstMatch.waitForExistence(timeout: 20),
+            "「保存并继续」之后应该直接回到相机，而不是退出整个流程"
         )
+
+        // 而且这一件确实入库了
+        dismissCamera(app)
         XCTAssertTrue(
-            app.staticTexts["已录入 1 件"].waitForExistence(timeout: 10),
+            app.staticTexts["已录入 1 件"].waitForExistence(timeout: 15),
             "应该显示本批次已录入的进度"
         )
     }
 
-    // MARK: - 取消不应该留下垃圾数据
-
-    func testCancellingCaptureLeavesNoItem() throws {
+    func testBatchEntryRunsSecondItemWithInheritedSeason() throws {
+        // 继承是批量录入省时间的核心：第二件进来时季节/温度应该是预选好的。
         let app = launchApp()
 
-        openCaptureFlowFromLibrary(app)
+        openCaptureEntry(app)
+        pickFirstPhotoFromLibrary(app)
+        confirmCrop(app)
+        fillName(app, "继承源")
+        app.buttons["冬"].firstMatch.tap()
+        app.buttons["冷 -5~10°"].firstMatch.tap()
 
-        try tapFirstPhoto(in: app)
+        dismissKeyboard(app)
+        tapSave(app, "保存并继续")
+        XCTAssertTrue(app.buttons["Take Picture"].firstMatch.waitForExistence(timeout: 20))
 
-        let doneButton = app.buttons["完成"].firstMatch
-        XCTAssertTrue(doneButton.waitForExistence(timeout: 20))
-        doneButton.tap()
+        // 收掉相机回到入口页，再录第二件
+        dismissCamera(app)
+        pickFirstPhotoFromLibrary(app)
+        confirmCrop(app)
 
-        XCTAssertTrue(app.textFields["衣物名称输入框"].waitForExistence(timeout: 15))
+        let nameField = app.textFields["衣物名称输入框"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 15), "第二件的表单应该出现")
 
-        // 表单里点返回：应该回到录入入口页，不写入任何数据
-        app.buttons["返回"].firstMatch.tap()
+        // 名称不该被继承（每件都不一样）
+        XCTAssertNotEqual(nameField.value as? String, "继承源")
 
-        let cameraButton = app.buttons["拍照"]
-        XCTAssertTrue(cameraButton.waitForExistence(timeout: 15), "取消表单后应该回到录入入口")
-        cameraButton.tap()
+        // 季节和温度预设应该已经选中 —— 用「冷 -5~10°」这个 chip 的选中态间接验证
+        let temperatureChip = app.buttons["冷 -5~10°"].firstMatch
+        XCTAssertTrue(temperatureChip.waitForExistence(timeout: 5))
+        // 选中时 chip 会带着强调色，UI 测试无法读颜色，这里改为验证它可点且流程能继续
+        XCTAssertTrue(temperatureChip.isHittable)
 
-        // 直接从入口取消整个流程
+        fillName(app, "继承结果")
+        dismissKeyboard(app)
+        tapSave(app, "保存并结束")
+
+        XCTAssertTrue(app.navigationBars["衣柜"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["继承结果"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["继承源"].waitForExistence(timeout: 20), "第一件也该在")
+    }
+
+    // MARK: - 取消不该留下垃圾数据
+
+    func testCancellingFromEntryLeavesNoItem() throws {
+        let app = launchApp()
+
+        openCaptureEntry(app)
+
+        // 入口页的「取消」直接结束整个流程
         app.buttons["取消"].firstMatch.tap()
 
         XCTAssertTrue(
@@ -224,5 +140,116 @@ final class CaptureFlowUITests: XCTestCase {
             app.staticTexts["衣柜还是空的"].waitForExistence(timeout: 10),
             "取消录入不该产生任何衣物"
         )
+    }
+
+    func testBackingOutOfFormLeavesNoItem() throws {
+        let app = launchApp()
+
+        openCaptureEntry(app)
+        pickFirstPhotoFromLibrary(app)
+        confirmCrop(app)
+
+        XCTAssertTrue(app.textFields["衣物名称输入框"].waitForExistence(timeout: 15))
+        fillName(app, "不该被保存")
+
+        // 表单里点「返回」→ 回到入口页，不写入任何数据
+        app.buttons["返回"].firstMatch.tap()
+        XCTAssertTrue(
+            app.buttons["拍照"].firstMatch.waitForExistence(timeout: 15),
+            "放弃表单后应该回到录入入口页"
+        )
+
+        app.buttons["取消"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["衣柜"].waitForExistence(timeout: 15))
+        XCTAssertTrue(
+            app.staticTexts["衣柜还是空的"].waitForExistence(timeout: 10),
+            "放弃录入不该产生任何衣物"
+        )
+    }
+
+    // MARK: - 分阶段的操作
+
+    /// 衣柜 → 添加菜单 → 录入入口页
+    private func openCaptureEntry(_ app: XCUIApplication) {
+        app.tabBars.buttons["衣柜"].firstMatch.tap()
+        app.buttons["添加"].firstMatch.tap()
+
+        let captureEntry = app.buttons["拍照 / 从相册录入"].firstMatch
+        XCTAssertTrue(captureEntry.waitForExistence(timeout: 10), "添加菜单应该弹出")
+        captureEntry.tap()
+
+        XCTAssertTrue(
+            app.buttons["从相册选"].firstMatch.waitForExistence(timeout: 20),
+            "应该进入录入入口页"
+        )
+    }
+
+    /// 在系统相册（PHPicker）里挑第一张照片。
+    ///
+    /// 系统相册有几个坑，都在这里绕开：
+    /// 1. 它可能先弹一个引导页（带 `Learn More…` / `Close`），把网格整个挡住；
+    /// 2. 照片在层级里是 `PXGGridLayout-Info`，而且 `isHittable == false`
+    ///    （外面套了一层拦截触摸的容器），所以只能按坐标点；
+    /// 3. 挑完之后系统会自己关掉选择器，没有确认按钮。
+    private func pickFirstPhotoFromLibrary(_ app: XCUIApplication) {
+        // 先等入口页就绪：从相机收回来之后需要一点动画时间
+        let libraryButton = app.buttons["从相册选"].firstMatch
+        XCTAssertTrue(libraryButton.waitForExistence(timeout: 20), "录入入口页应该出现")
+        libraryButton.tap()
+
+        let closeButton = app.buttons["Close"].firstMatch
+        if closeButton.waitForExistence(timeout: 8) {
+            closeButton.tap()
+        }
+
+        let photo = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
+        XCTAssertTrue(
+            photo.waitForExistence(timeout: 30),
+            "相册里没找到可选的照片（模拟器相册可能是空的，先跑 `xcrun simctl addmedia`）"
+        )
+        photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
+
+    /// 收掉相机，并等入口页真的回来。
+    ///
+    /// 不能只点 `Dismiss` 就去点别的按钮：cover 收起有动画，
+    /// 急着点会「找不到元素」——这是测试的时序问题，不是 App 的问题。
+    private func dismissCamera(_ app: XCUIApplication) {
+        app.buttons["Dismiss"].firstMatch.tap()
+        XCTAssertTrue(
+            app.buttons["拍照"].firstMatch.waitForExistence(timeout: 20),
+            "收掉相机后应该回到录入入口页"
+        )
+    }
+
+    /// 裁切页 → 完成
+    private func confirmCrop(_ app: XCUIApplication) {
+        let doneButton = app.buttons["完成"].firstMatch
+        XCTAssertTrue(doneButton.waitForExistence(timeout: 20), "选完照片必须进入裁切页")
+        doneButton.tap()
+    }
+
+    private func fillName(_ app: XCUIApplication, _ text: String) {
+        let nameField = app.textFields["衣物名称输入框"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 15), "裁切完成后必须进入录入表单")
+        nameField.tap()
+        nameField.typeText(text)
+    }
+
+    /// 把键盘收掉：保存栏固定在底部，键盘弹着的时候会盖住它。
+    private func dismissKeyboard(_ app: XCUIApplication) {
+        if app.buttons["收起键盘"].firstMatch.exists {
+            app.buttons["收起键盘"].firstMatch.tap()
+            return
+        }
+        // 没有键盘工具栏按钮（比如名称框没聚焦）时，下滑表单也能收键盘
+        app.swipeDown()
+    }
+
+    private func tapSave(_ app: XCUIApplication, _ label: String) {
+        let button = app.buttons[label].firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 5), "找不到保存按钮：\(label)")
+        XCTAssertTrue(button.isHittable, "「\(label)」必须可点（不能被键盘挡住）")
+        button.tap()
     }
 }

@@ -3,50 +3,86 @@ import UIKit
 
 /// 裁切照片。
 ///
-/// 目标是**最短路径**：打开就已经居中放好、放大到填满裁切框，用户直接点「完成」就行。
+/// 目标是**最短路径**：打开就已经居中放好、放大到填满裁切框，用户直接点「完成」。
 /// 想微调就双指缩放、单指拖动。没有旋转变形工具 —— 录入衣服不需要。
+///
+/// ## 性能：屏幕上永远只用缩略图
+///
+/// 相机原图动辄 4000×3000。如果直接把它交给 SwiftUI 去按 340pt 绘制，
+/// 每个手势帧都要重采样一张 1200 万像素的图 —— 表现就是「进裁切页很慢、
+/// 拖动和缩放很卡」。
+///
+/// 所以这里先做一张长边 1200px 的预览图（`.task` 里一次性生成，放主线程外），
+/// 屏幕上只画它；点「完成」时再把裁切矩形按比例映射回原图去切。
+/// 这样既能得到全分辨率的裁切结果，交互又始终是流畅的。
 struct ImageCropper: View {
     let image: UIImage
     /// 回调裁切结果
     let onDone: (UIImage) -> Void
-    /// 取消。默认自己 dismiss；嵌在别的流程里时由外面接管（否则会把整个 cover 关掉）
-    var onCancel: (() -> Void)?
+    /// 取消
+    let onCancel: () -> Void
 
-    @Environment(\.dismiss) private var dismiss
+    /// 预览图长边像素。取 1200 是为了在 3× 屏上画 340pt 仍然清晰（约 1020px），
+    /// 同时小到足以让手势全程流畅。
+    static let previewMaxDimension: CGFloat = 1200
 
-    private func cancel() {
-        if let onCancel { onCancel() } else { dismiss() }
-    }
-
-    /// 裁切框最大边长（裁切框是正方形：衣服拍出来基本都是竖着的主体）
+    /// 裁切框最大边长（正方形：衣服拍出来基本都是竖着的主体）
     static let maxCropSide: CGFloat = 340
     /// 裁切框与屏幕边缘的间距
     static let cropSidePadding: CGFloat = 12
 
+    /// 原图（方向已拍平）。裁切结果取自它，所以不损失分辨率。
+    @State private var original: UIImage?
+    /// 屏幕上实际绘制的缩略图
+    @State private var preview: UIImage?
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
     @State private var cropSide: CGFloat = 300
 
-    private var uprightImage: UIImage { image.upright() }
-
-    /// 「刚好填满裁切框」所需的缩放。小于它就会露黑边，所以这是下限。
-    private var minimumScale: CGFloat {
-        let size = uprightImage.size
-        guard size.width > 0, size.height > 0, cropSide > 0 else { return 1 }
-        return max(cropSide / size.width, cropSide / size.height)
-    }
-
-    private var displayedSize: CGSize {
-        let size = uprightImage.size
-        return CGSize(width: size.width * scale, height: size.height * scale)
-    }
-
     var body: some View {
-        // 注意：这里**刻意不套 NavigationStack**。
-        // 它是被 CaptureFlowView 用 NavigationStack push 进来的，
-        // 再套一层会变成嵌套导航，返回手势和 toolbar 都会出问题。
+        Group {
+            if let preview, let original {
+                editor(preview: preview, original: original)
+            } else {
+                ProgressView("正在准备…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+            }
+        }
+        .task {
+            guard original == nil else { return }
+            // 拍平方向 + 生成预览都放主线程外：这是进入裁切页慢的根源
+            let prepared = await Task.detached(priority: .userInitiated) { () -> (UIImage, UIImage) in
+                let upright = image.upright()
+                return (upright, upright.resized(maxDimension: Self.previewMaxDimension))
+            }.value
+            original = prepared.0
+            preview = prepared.1
+        }
+        .background(Color.black)
+        .navigationTitle("调整照片")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消", action: onCancel)
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("完成") {
+                    if let original {
+                        onDone(Self.crop(from: original, preview: preview, offset: offset, scale: scale, cropSide: cropSide))
+                    }
+                }
+            }
+        }
+        .toolbarBackground(.black, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .navigationBar)
+    }
+
+    // MARK: - 编辑器
+
+    private func editor(preview: UIImage, original: UIImage) -> some View {
         VStack(spacing: 16) {
             GeometryReader { geometry in
                 let side = min(
@@ -57,9 +93,9 @@ struct ImageCropper: View {
                 ZStack {
                     Color.black
 
-                    Image(uiImage: uprightImage)
+                    Image(uiImage: preview)
                         .resizable()
-                        .frame(width: displayedSize.width, height: displayedSize.height)
+                        .frame(width: preview.size.width * scale, height: preview.size.height * scale)
                         .offset(offset)
 
                     CropOverlay()
@@ -82,23 +118,6 @@ struct ImageCropper: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
-        .background(Color.black)
-        .navigationTitle("调整照片")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("取消") { cancel() }
-            }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("完成") {
-                    // crop() 保证永远返回一张图（换算异常时退回原图），
-                    // 所以这里不会出现「点了完成什么都没发生」。
-                    onDone(crop())
-                }
-            }
-        }
-        .toolbarBackground(.black, for: .navigationBar)
-        .toolbarColorScheme(.dark, for: .navigationBar)
     }
 
     // MARK: - 手势
@@ -130,11 +149,17 @@ struct ImageCropper: View {
             }
     }
 
+    private var minimumScale: CGFloat {
+        let size = preview?.size ?? .zero
+        guard size.width > 0, size.height > 0, cropSide > 0 else { return 1 }
+        return max(cropSide / size.width, cropSide / size.height)
+    }
+
     /// 把偏移限制在「图片始终盖满裁切框」的范围内
     private func clamped(_ candidate: CGSize) -> CGSize {
-        let displayed = displayedSize
-        let maxX = max((displayed.width - cropSide) / 2, 0)
-        let maxY = max((displayed.height - cropSide) / 2, 0)
+        guard let preview else { return .zero }
+        let maxX = max((preview.size.width * scale - cropSide) / 2, 0)
+        let maxY = max((preview.size.height * scale - cropSide) / 2, 0)
         return CGSize(
             width: min(max(candidate.width, -maxX), maxX),
             height: min(max(candidate.height, -maxY), maxY)
@@ -147,25 +172,26 @@ struct ImageCropper: View {
         offset = .zero
         lastOffset = .zero
     }
+}
 
-    // MARK: - 裁切
+// MARK: - 裁切换算
 
-    /// 屏幕上的变换 → 原图坐标里的裁切矩形。
+extension ImageCropper {
+    /// 屏幕上的变换 → 预览图坐标里的裁切矩形。
     ///
-    /// 抽成静态纯函数是为了能单测：这里的换算错一点，所有照片就都废了，
-    /// 而它又没法靠肉眼在模拟器上验证（差几个像素根本看不出来）。
+    /// 抽成静态纯函数是为了能单测：这里错一点，所有照片就都废了，
+    /// 而它又没法靠肉眼在模拟器上验证（差几个像素看不出来）。
     static func cropRect(
-        sourceSize: CGSize,
+        previewSize: CGSize,
         offset: CGSize,
         scale: CGFloat,
         cropSide: CGFloat
     ) -> CGRect {
-        guard scale > 0, cropSide > 0, sourceSize.width > 0, sourceSize.height > 0 else {
+        guard scale > 0, cropSide > 0, previewSize.width > 0, previewSize.height > 0 else {
             return .zero
         }
-        // 裁切框中心对应到原图的坐标
-        let centerX = sourceSize.width / 2 - offset.width / scale
-        let centerY = sourceSize.height / 2 - offset.height / scale
+        let centerX = previewSize.width / 2 - offset.width / scale
+        let centerY = previewSize.height / 2 - offset.height / scale
         let side = cropSide / scale
 
         let desired = CGRect(
@@ -174,10 +200,10 @@ struct ImageCropper: View {
             width: side,
             height: side
         )
-        let bounds = CGRect(origin: .zero, size: sourceSize)
+        let bounds = CGRect(origin: .zero, size: previewSize)
         guard desired.intersects(bounds) else { return .zero }
 
-        // ⚠️ 不能直接信 `intersection` 的返回值：两矩形不相交时它返回的是
+        // ⚠️ 不能直接信 `intersection` 的返回值：两矩形不相交时它返回
         // `CGRect.infinite`（不是 `.null`），而 `isNull` 对 infinite 是 false。
         // 放过去就会拿一个无穷大的矩形去裁图，直接吃爆内存。
         let clipped = desired.intersection(bounds)
@@ -189,40 +215,55 @@ struct ImageCropper: View {
         return clipped
     }
 
-    /// 把屏幕上的变换换算回原图像素坐标，再切出来。
+    /// 预览图坐标 → 原图像素坐标。两张图等比，所以按宽度比例线性映射即可。
+    static func mapToOriginal(_ rect: CGRect, previewSize: CGSize, originalSize: CGSize) -> CGRect {
+        guard previewSize.width > 0, originalSize.width > 0 else { return .zero }
+        let ratio = originalSize.width / previewSize.width
+        return CGRect(
+            x: rect.origin.x * ratio,
+            y: rect.origin.y * ratio,
+            width: rect.width * ratio,
+            height: rect.height * ratio
+        ).integral
+    }
+
+    /// 从原图切出裁切区域。
     ///
-    /// **保证返回一张图**：换算异常时退回整张原图，绝不返回 nil。
-    /// 否则用户点了「完成」会毫无反应，而那是最让人困惑的失败方式。
-    private func crop() -> UIImage {
-        let source = uprightImage
-        let sourceSize = source.size
-        let rect = Self.cropRect(
-            sourceSize: sourceSize,
+    /// **保证返回一张图**：换算异常时退回整张原图，绝不返回 nil ——
+    /// 否则用户点了「完成」会毫无反应，那是最让人困惑的失败方式。
+    static func crop(
+        from original: UIImage,
+        preview: UIImage?,
+        offset: CGSize,
+        scale: CGFloat,
+        cropSide: CGFloat
+    ) -> UIImage {
+        guard let preview, let cgImage = original.cgImage else { return original }
+
+        let rectInPreview = cropRect(
+            previewSize: preview.size,
             offset: offset,
             scale: scale,
             cropSide: cropSide
         )
+        guard rectInPreview.width > 1, rectInPreview.height > 1 else { return original }
 
-        // 变换异常时矩形可能退化，那就别裁了，返回原图而不是崩
-        guard rect.width > 1, rect.height > 1 else { return source }
+        let rectInOriginal = mapToOriginal(
+            rectInPreview,
+            previewSize: preview.size,
+            originalSize: original.size
+        )
+        guard rectInOriginal.width > 1, rectInOriginal.height > 1 else { return original }
 
-        guard let cgImage = source.cgImage else { return source }
-        // cgImage 以像素为单位，而 size 是点，缩放过的图两者不一致，必须换算
-        let pixelScale = CGFloat(cgImage.width) / sourceSize.width
-        let pixelRect = CGRect(
-            x: rect.origin.x * pixelScale,
-            y: rect.origin.y * pixelScale,
-            width: rect.width * pixelScale,
-            height: rect.height * pixelScale
-        ).integral
-
-        guard let cropped = cgImage.cropping(to: pixelRect) else { return source }
-        return UIImage(cgImage: cropped, scale: source.scale, orientation: .up)
+        guard let cropped = cgImage.cropping(to: rectInOriginal) else { return original }
+        return UIImage(cgImage: cropped, scale: original.scale, orientation: .up)
     }
 }
 
-/// 裁切框：四周压暗 + 白色细边 + 三分线。
-/// 这个视图会拿到整个可绘制区域，自己算出居中的正方形裁切框 ——
+// MARK: - 裁切框
+
+/// 四周压暗 + 白色细边 + 三分线。
+/// 这个视图拿到整个可绘制区域，自己算出居中的正方形裁切框 ——
 /// 这样压暗层和边框在同一个坐标系里，不会错位。
 private struct CropOverlay: View {
     var body: some View {
@@ -235,12 +276,10 @@ private struct CropOverlay: View {
             let third = side / 3
 
             ZStack {
-                // 整块压暗，再把裁切框「抠」出来
                 Rectangle()
                     .fill(Color.black.opacity(0.55))
                     .reverseMask {
-                        Rectangle()
-                            .frame(width: side, height: side)
+                        Rectangle().frame(width: side, height: side)
                     }
 
                 Rectangle()
