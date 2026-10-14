@@ -70,7 +70,11 @@ echo "==> 安装到手机…"
 xcrun devicectl device install app --device "$DEVICE_ID" "$APP_PATH" 2>&1 | tail -5
 
 echo "==> 启动…"
-xcrun devicectl device process launch --device "$DEVICE_ID" "$BUNDLE_ID" 2>&1 | tail -2
+# 手机锁着的时候启动会被拒（BSErrorCodeDescription = Locked）。
+# 这时候**安装已经成功了**，不该当成失败 —— 解锁后手动点开图标即可。
+if xcrun devicectl device process launch --device "$DEVICE_ID" "$BUNDLE_ID" 2>&1 | tee /tmp/ioscloth-launch.log | grep -q "Locked"; then
+  echo "   手机处于锁屏状态，先不自动启动。解锁后点桌面上的「衣橱」图标即可。"
+fi
 
 echo
-echo "✅ 完成。证书 7 天后过期，届时再跑一次这个脚本即可。"
+echo "✅ 安装完成。证书 7 天后过期，届时再跑一次这个脚本即可。"

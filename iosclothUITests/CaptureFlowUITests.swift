@@ -123,6 +123,44 @@ final class CaptureFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["继承源"].waitForExistence(timeout: 20), "第一件也该在")
     }
 
+    // MARK: - 裁切页的缩放平移
+
+    /// 缩放平移之后仍然能正常裁切并保存。
+    ///
+    /// 这条守的是一个具体的回归：之前自己用 SwiftUI 手势算缩放平移，
+    /// `startAnchor` 的坐标系搞错了，导致「无论捏哪里取景框都往右下漂」，
+    /// 最后裁出来的位置完全不是用户看到的位置。
+    /// 现在改用 `UIScrollView`，这个测试保证「捏过之后流程仍然完整」。
+    func testPinchAndDragThenCropStillSaves() throws {
+        let app = launchApp()
+
+        openCaptureEntry(app)
+        pickFirstPhotoFromLibrary(app)
+
+        let doneButton = app.buttons["完成"].firstMatch
+        XCTAssertTrue(doneButton.waitForExistence(timeout: 20), "选完照片必须进入裁切页")
+
+        // 在取景区捏合放大，再拖动
+        let canvas = app.images.firstMatch
+        canvas.pinch(withScale: 2.0, velocity: 1.0)
+        // 用坐标做拖拽：XCUIElement 的 press(forDuration:thenDragTo:) 只接受元素
+        let start = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.35))
+        let end = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.65))
+        start.press(forDuration: 0.1, thenDragTo: end)
+
+        doneButton.tap()
+
+        fillName(app, "缩放后裁切")
+        dismissKeyboard(app)
+        tapSave(app, "保存并结束")
+
+        XCTAssertTrue(app.navigationBars["衣柜"].waitForExistence(timeout: 20))
+        XCTAssertTrue(
+            app.staticTexts["缩放后裁切"].waitForExistence(timeout: 20),
+            "缩放平移之后裁切保存必须照常成功"
+        )
+    }
+
     // MARK: - 取消不该留下垃圾数据
 
     func testCancellingFromEntryLeavesNoItem() throws {
