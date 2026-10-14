@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+# XcodeGen 生成物（project.yml 是唯一事实来源）
+*.xcodeproj/
+# SwiftPM
+.build/
+.swiftpm/

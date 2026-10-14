@@ -1,0 +1,53 @@
+name: ioscloth
+options:
+  bundleIdPrefix: com.chuxinchen
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    # 本机先只跑模拟器：签名交给 Xcode 自动处理，不写死 Team，
+    # 换机器/换账号都不会卡在 "No signing certificate"。
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  ioscloth:
+    type: application
+    platform: iOS
+    sources:
+      - path: ioscloth
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chuxinchen.ioscloth
+        PRODUCT_NAME: ioscloth
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        # 不手写 Info.plist，交给 Xcode 从下面的 INFOPLIST_KEY_* 生成
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: 衣橱
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        # 相机与相册权限文案（M2 录入流程要用，先声明好）
+        INFOPLIST_KEY_NSCameraUsageDescription: 用来给衣服拍照，照片只保存在这台手机上。
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: 从相册选择衣服照片，照片只保存在这台手机上。
+        TARGETED_DEVICE_FAMILY: "1"
+
+  iosclothTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: iosclothTests
+    dependencies:
+      - target: ioscloth
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chuxinchen.ioscloth.tests
+        GENERATE_INFOPLIST_FILE: YES
+        ENABLE_TESTING_SEARCH_PATHS: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ioscloth.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ioscloth"
+        BUNDLE_LOADER: "$(TEST_HOST)"
