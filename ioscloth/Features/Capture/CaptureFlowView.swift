@@ -3,7 +3,7 @@ import SwiftData
 import UIKit
 import PhotosUI
 
-/// 录入流程的调度器：**入口页 → 拍照/相册 → 裁切 → 表单 →（批量）回到相机**。
+/// 录入流程的调度器：**入口页 → 拍照/相册 → 裁切 → 表单 →（批量）回到上一个来源**。
 ///
 /// 这是整个 App 最重要的一条路径（DESIGN.md §5.2）。
 /// 衡量它好坏的唯一标准是：同一季的衣服连拍 20 件要多久。
@@ -11,23 +11,29 @@ import PhotosUI
 /// - 相机 / 相册两个大按钮，不用先理解别的概念
 /// - 裁切框打开就居中填满，直接点「完成」就行
 /// - 表单的季节/温度/场景继承上一件，只需按「保存并继续」
+/// - 「保存并继续」回到**你刚才用的那个来源**（拍照来的回相机，相册来的回相册）
 ///
-/// ## 两条必须守住的规则（改之前务必先读，这里踩过两次坑）
+/// ## 三条必须守住的规则（改之前务必先读，每条都对应一个线上 bug）
 ///
 /// **1. 任何子视图都不许自己关闭自己。**
 ///    关闭一律由本视图改 `scene` 完成，子视图只回调。
 ///    之前 `ClothingEditView` 和 `CameraPicker` 各自调 `dismiss()`，结果
-///    sheet 的绑定和真实状态对不上 —— 按钮点了没反应，只有手动下滑才关得掉，
-///    而数据其实早就保存成功了。
+///    sheet 的绑定和真实状态对不上 —— 按钮点了没反应，只有手动下滑才关得掉。
 ///
-/// **2. 关掉一个模态、再开另一个（或反过来）时，必须等前一个收干净。**
-///    正在关闭的 sheet 和正在打开的 cover 撞在一起，SwiftUI 会把两者一起丢掉
-///    （表现为「点了使用照片什么都没发生」）。所以切场景走 `enter(_:)`，
-///    它保证「先关旧的 → 等动画 → 再开新的」。
+/// **2. 只有在「模态 → 模态」时才需要等关闭动画；其余切换要同步完成。**
+///    在同一次状态更新里既关 sheet 又开 cover，SwiftUI 会把两者一起丢掉
+///    （表现为「点了使用照片什么都没发生」）。但**绝不能**给所有切换都加延时，
+///    否则会出现「延时的二次状态变更把刚建好的页面拆掉」——
+///    裁切页刚弹出就消失就是这么来的。
+///
+/// **3. 状态切换不能有「被丢弃就永久卡死」的守卫。**
+///    之前 `enter()` 里的 `guard nextScene == nil else { return }` 一旦命中一次，
+///    后面所有点击都静默失效。
 struct CaptureFlowView: View {
     /// 流程结束
     let onFinish: () -> Void
 
+    /// 当前场景。用**单选**状态机表达，避免多个布尔量互相矛盾。
     private enum Scene: Equatable {
         case idle
         case camera
@@ -35,34 +41,36 @@ struct CaptureFlowView: View {
         case form
     }
 
+    /// 连续录入时，「保存并继续」要回到哪个来源
+    private enum CaptureSource {
+        case camera
+        case library
+    }
+
     @State private var scene: Scene = .idle
-    /// 本轮正在进入的场景。非 nil 时 `presentedScene` 保持旧值，
-    /// 好让 SwiftUI 保留旧的呈现容器到动画结束。
-    @State private var nextScene: Scene?
     @State private var captured: UIImage?
     /// 本批次已录入件数
     @State private var recordedCount = 0
     /// 下一件要继承的字段
     @State private var seed = ClothingEditView.Draft()
+    /// 这一轮是从哪来的，决定「保存并继续」回哪里
+    @State private var source: CaptureSource = .camera
 
     @State private var isPickingFromLibrary = false
     @State private var libraryItem: PhotosPickerItem?
     @State private var cameraUnavailableAlert = false
 
-    /// 实际参与呈现的场景。切场景时**故意滞后**，等旧模态收干净。
-    private var presentedScene: Scene { nextScene ?? scene }
-
     var body: some View {
         Group {
-            switch presentedScene {
+            switch scene {
+            case .idle:
+                entryScreen
             case .camera:
                 cameraScreen
             case .cropping:
                 croppingScreen
             case .form:
                 formScreen
-            case .idle:
-                entryScreen
             }
         }
         .photosPicker(isPresented: $isPickingFromLibrary, selection: $libraryItem, matching: .images)
@@ -79,28 +87,26 @@ struct CaptureFlowView: View {
 
     // MARK: - 场景切换
 
-    /// 关闭当前模态、等它收干净、再打开目标场景。
+    /// 关闭当前模态，必要时等它收干净，再打开目标场景。
     ///
-    /// 这个 400ms 不是凑数：sheet / cover 的收起动画约 0.35 秒，
-    /// 在同一次状态更新里既关旧的又开新的，SwiftUI 会把两者一起丢掉。
+    /// 只有 `.cropping → .form`（两个都是模态）需要等：同一次更新里关一个开一个，
+    /// SwiftUI 会把两者一起丢掉。
+    ///
+    /// 这里**故意没有**「已经在切换中就忽略」的守卫 —— 那种守卫一旦命中就永久卡死。
+    /// 重复调用是无害的：就是重新设一次目标场景。
     private func enter(_ target: Scene) {
-        guard nextScene == nil else { return }
+        let needsWait = (scene == .cropping && target == .form)
+        scene = .idle
+        if target != .form { captured = nil }
 
-        let closingModal = scene != .idle
-
-        if !closingModal {
+        guard needsWait else {
             scene = target
             return
         }
 
-        nextScene = target
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(400))
-            // 只有离开表单时才丢掉这轮的照片：提前丢会让表单/裁切页提前变空，
-            // 过渡期间闪一下，甚至把容器拆掉。
-            if target != .form { captured = nil }
             scene = target
-            nextScene = nil
         }
     }
 
@@ -138,11 +144,7 @@ struct CaptureFlowView: View {
 
                 VStack(spacing: 12) {
                     Button {
-                        if CameraPicker.isAvailable {
-                            enter(.camera)
-                        } else {
-                            cameraUnavailableAlert = true
-                        }
+                        startCamera()
                     } label: {
                         Label("拍照", systemImage: "camera.fill")
                             .frame(maxWidth: .infinity)
@@ -151,7 +153,7 @@ struct CaptureFlowView: View {
                     .controlSize(.large)
 
                     Button {
-                        isPickingFromLibrary = true
+                        startLibrary()
                     } label: {
                         Label("从相册选", systemImage: "photo.on.rectangle")
                             .frame(maxWidth: .infinity)
@@ -178,13 +180,35 @@ struct CaptureFlowView: View {
         }
     }
 
+    // MARK: - 入口动作
+
+    private func startCamera() {
+        guard CameraPicker.isAvailable else {
+            cameraUnavailableAlert = true
+            return
+        }
+        source = .camera
+        captured = nil
+        scene = .camera
+    }
+
+    private func startLibrary() {
+        source = .library
+        captured = nil
+        scene = .idle
+        isPickingFromLibrary = true
+    }
+
     // MARK: - 相机（自己是一个全屏模态，不自己关闭）
 
     private var cameraScreen: some View {
         CameraPicker(
             onCapture: { image in
+                // 同一个回调可能因为系统行为被触发两次，第二次会带着已经变过的
+                // scene 进来。加个守卫避免把裁切页刚建好又拆掉。
+                guard scene == .camera else { return }
                 captured = image
-                enter(.cropping)
+                scene = .cropping
             },
             onCancel: { enter(.idle) }
         )
@@ -221,11 +245,17 @@ struct CaptureFlowView: View {
                 seed: $seed,
                 onSaved: { continueBatch in
                     recordedCount += 1
-                    enter(continueBatch ? .camera : .idle)
+                    if continueBatch {
+                        // 回到刚才用的那个来源，而不是一律回相机
+                        switch source {
+                        case .camera: startCamera()
+                        case .library: startLibrary()
+                        }
+                    } else {
+                        enter(.idle)
+                    }
                 },
-                onCancel: {
-                    enter(.idle)
-                }
+                onCancel: { enter(.idle) }
             )
         } else {
             Color.clear.onAppear { enter(.idle) }
@@ -238,7 +268,8 @@ struct CaptureFlowView: View {
         defer { libraryItem = nil }
         guard let data = try? await item.loadTransferable(type: Data.self),
               let image = UIImage(data: data) else { return }
+        guard scene == .idle else { return }
         captured = image
-        enter(.cropping)
+        scene = .cropping
     }
 }

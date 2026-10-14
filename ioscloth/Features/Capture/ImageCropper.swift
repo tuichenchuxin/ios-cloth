@@ -40,6 +40,8 @@ struct ImageCropper: View {
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
     @State private var cropSide: CGFloat = 300
+    /// 正在捏合。捏合时禁掉拖动，否则两个手势同时改 offset 会互相打架。
+    @State private var isMagnifying = false
 
     var body: some View {
         Group {
@@ -125,6 +127,7 @@ struct ImageCropper: View {
     private var dragGesture: some Gesture {
         DragGesture()
             .onChanged { value in
+                guard !isMagnifying else { return }
                 offset = clamped(
                     CGSize(
                         width: lastOffset.width + value.translation.width,
@@ -137,15 +140,39 @@ struct ImageCropper: View {
             }
     }
 
+    /// 捏合缩放，**以手指中心为锚点**。
+    ///
+    /// 为什么必须做锚定：如果只改 scale，图会以视图中心为原点放大，
+    /// 你捏右边时图就往右跑，取景框看起来「漂走」了（用户实际报的问题）。
+    /// 正确做法是让手指按住的那个点在屏幕上保持不动：
+    ///
+    ///   放大前该点在屏幕上的位置 = center + offset + f * scale
+    ///   放大后要保持不变       → offset' = offset + f * (scale - scale')
+    ///
+    /// 其中 f 是手指相对视图中心的位置。
     private var magnifyGesture: some Gesture {
         MagnifyGesture()
             .onChanged { value in
-                scale = max(lastScale * value.magnification, minimumScale)
-                offset = clamped(offset)
+                if !isMagnifying { isMagnifying = true }
+
+                let newScale = Self.zoomedScale(
+                    lastScale: lastScale,
+                    magnification: value.magnification,
+                    minimumScale: minimumScale
+                )
+                offset = clamped(Self.anchoredOffset(
+                    offset: lastOffset,
+                    startAnchor: value.startAnchor,
+                    cropSide: cropSide,
+                    fromScale: scale,
+                    toScale: newScale
+                ))
+                scale = newScale
             }
             .onEnded { _ in
                 lastScale = scale
                 lastOffset = offset
+                isMagnifying = false
             }
     }
 
@@ -177,6 +204,38 @@ struct ImageCropper: View {
 // MARK: - 裁切换算
 
 extension ImageCropper {
+    /// 捏合后的新缩放值。
+    static func zoomedScale(lastScale: CGFloat, magnification: CGFloat, minimumScale: CGFloat) -> CGFloat {
+        max(lastScale * magnification, minimumScale)
+    }
+
+    /// 捏合时把偏移量校正到「手指按住的那个点不动」。
+    ///
+    /// 推导：设手指相对裁切框中心的位置为 `f`，视图中心到图像中心为 `offset`，
+    /// 那么该点在屏幕上的位置是 `offset + f * scale`。缩放前后要保持不变：
+    ///
+    ///     offset + f * fromScale = offset' + f * toScale
+    ///  ⇒ offset' = offset + f * (fromScale - toScale)
+    ///
+    /// 不做这步校正的话，图像会以视图中心为原点放大 —— 捏右边图就往右跑，
+    /// 取景框看起来「漂走」了。
+    static func anchoredOffset(
+        offset: CGSize,
+        startAnchor: UnitPoint,
+        cropSide: CGFloat,
+        fromScale: CGFloat,
+        toScale: CGFloat
+    ) -> CGSize {
+        let focal = CGSize(
+            width: (startAnchor.x - 0.5) * cropSide,
+            height: (startAnchor.y - 0.5) * cropSide
+        )
+        return CGSize(
+            width: offset.width + focal.width * (fromScale - toScale),
+            height: offset.height + focal.height * (fromScale - toScale)
+        )
+    }
+
     /// 屏幕上的变换 → 预览图坐标里的裁切矩形。
     ///
     /// 抽成静态纯函数是为了能单测：这里错一点，所有照片就都废了，

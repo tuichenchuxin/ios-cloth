@@ -53,28 +53,29 @@ final class CaptureFlowUITests: XCTestCase {
 
     // MARK: - 批量录入
 
-    func testBatchEntryReturnsToCameraAfterSave() throws {
-        // 批量模式的承诺：点「保存并继续」存完立刻回到相机接着拍。
+    func testSaveAndContinueFromLibraryReturnsToLibrary() throws {
+        // 用户要求的语义：「保存并继续」要回到**刚才用的那个来源**。
+        // 从相册来的就回相册，从相机来的才回相机。
         let app = launchApp()
 
         openCaptureEntry(app)
         pickFirstPhotoFromLibrary(app)
         confirmCrop(app)
-        fillName(app, "批量第一件")
+        fillName(app, "相册批量第一件")
         app.buttons["冬"].firstMatch.tap()
-        app.buttons["冷 -5~10°"].firstMatch.tap()
 
         dismissKeyboard(app)
         tapSave(app, "保存并继续")
 
-        // 关键断言：相机真的起来了（模拟器上也有「拍照」这个按钮，只是不可用）
+        // 关键断言：相册又弹出来了（而不是跳到相机）
+        let photo = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
         XCTAssertTrue(
-            app.buttons["Take Picture"].firstMatch.waitForExistence(timeout: 20),
-            "「保存并继续」之后应该直接回到相机，而不是退出整个流程"
+            photo.waitForExistence(timeout: 30),
+            "从相册来的，「保存并继续」应该回到相册，而不是相机"
         )
 
-        // 而且这一件确实入库了
-        dismissCamera(app)
+        // 收掉相册，确认这一件确实入库了
+        app.buttons["Cancel"].firstMatch.tap()
         XCTAssertTrue(
             app.staticTexts["已录入 1 件"].waitForExistence(timeout: 15),
             "应该显示本批次已录入的进度"
@@ -94,11 +95,11 @@ final class CaptureFlowUITests: XCTestCase {
 
         dismissKeyboard(app)
         tapSave(app, "保存并继续")
-        XCTAssertTrue(app.buttons["Take Picture"].firstMatch.waitForExistence(timeout: 20))
 
-        // 收掉相机回到入口页，再录第二件
-        dismissCamera(app)
-        pickFirstPhotoFromLibrary(app)
+        // 从相册来源的「保存并继续」直接回到相册，可以立刻选第二张
+        let secondPhoto = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
+        XCTAssertTrue(secondPhoto.waitForExistence(timeout: 30), "应该直接回到相册")
+        secondPhoto.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         confirmCrop(app)
 
         let nameField = app.textFields["衣物名称输入框"]
@@ -208,18 +209,6 @@ final class CaptureFlowUITests: XCTestCase {
             "相册里没找到可选的照片（模拟器相册可能是空的，先跑 `xcrun simctl addmedia`）"
         )
         photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-    }
-
-    /// 收掉相机，并等入口页真的回来。
-    ///
-    /// 不能只点 `Dismiss` 就去点别的按钮：cover 收起有动画，
-    /// 急着点会「找不到元素」——这是测试的时序问题，不是 App 的问题。
-    private func dismissCamera(_ app: XCUIApplication) {
-        app.buttons["Dismiss"].firstMatch.tap()
-        XCTAssertTrue(
-            app.buttons["拍照"].firstMatch.waitForExistence(timeout: 20),
-            "收掉相机后应该回到录入入口页"
-        )
     }
 
     /// 裁切页 → 完成

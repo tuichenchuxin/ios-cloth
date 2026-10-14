@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import UIKit
 @testable import ioscloth
 
@@ -223,6 +224,113 @@ final class CaptureFlowTests: XCTestCase {
         return UIGraphicsImageRenderer(size: size, format: format).image { context in
             UIColor.systemBlue.setFill()
             context.fill(CGRect(origin: .zero, size: size))
+        }
+    }
+
+    // MARK: - 捏合缩放：必须锚定在手指位置
+
+    func testZoomedScaleRespectsMinimum() {
+        // 想缩小到 0.1，但不能小于「刚好填满」的下限
+        XCTAssertEqual(
+            ImageCropper.zoomedScale(lastScale: 0.5, magnification: 0.2, minimumScale: 0.5),
+            0.5,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            ImageCropper.zoomedScale(lastScale: 1, magnification: 2, minimumScale: 0.5),
+            2,
+            accuracy: 0.0001
+        )
+    }
+
+    /// 在正中心捏合时，锚点就是中心 → 偏移量不该变
+    func testAnchorAtCenterKeepsOffsetUnchanged() {
+        let result = ImageCropper.anchoredOffset(
+            offset: CGSize(width: 30, height: -20),
+            startAnchor: UnitPoint(x: 0.5, y: 0.5),
+            cropSide: 300,
+            fromScale: 1,
+            toScale: 2
+        )
+        XCTAssertEqual(result.width, 30, accuracy: 0.0001)
+        XCTAssertEqual(result.height, -20, accuracy: 0.0001)
+    }
+
+    /// 在右侧捏合放大时，偏移量要往左走 —— 让手指按住的点在屏幕上不动。
+    /// 不锚定的话这里会是 0（图像以中心放大），视觉上就是「框往右漂」。
+    func testAnchorOnRightMovesOffsetLeftWhenZoomingIn() {
+        let result = ImageCropper.anchoredOffset(
+            offset: .zero,
+            startAnchor: UnitPoint(x: 1.0, y: 0.5),
+            cropSide: 300,
+            fromScale: 1,
+            toScale: 2
+        )
+        // focal.width = (1.0 - 0.5) * 300 = 150
+        // offset' = 0 + 150 * (1 - 2) = -150
+        XCTAssertEqual(result.width, -150, accuracy: 0.0001)
+        XCTAssertEqual(result.height, 0, accuracy: 0.0001)
+    }
+
+    func testAnchorOnLeftMovesOffsetRightWhenZoomingIn() {
+        let result = ImageCropper.anchoredOffset(
+            offset: .zero,
+            startAnchor: UnitPoint(x: 0, y: 0.5),
+            cropSide: 300,
+            fromScale: 1,
+            toScale: 2
+        )
+        XCTAssertEqual(result.width, 150, accuracy: 0.0001)
+    }
+
+    /// 缩小时方向相反
+    func testAnchorOnRightMovesOffsetRightWhenZoomingOut() {
+        let result = ImageCropper.anchoredOffset(
+            offset: .zero,
+            startAnchor: UnitPoint(x: 1.0, y: 0.5),
+            cropSide: 300,
+            fromScale: 2,
+            toScale: 1
+        )
+        XCTAssertEqual(result.width, 150, accuracy: 0.0001)
+    }
+
+    /// 上下方向同理
+    func testAnchorOnBottomMovesOffsetUpWhenZoomingIn() {
+        let result = ImageCropper.anchoredOffset(
+            offset: .zero,
+            startAnchor: UnitPoint(x: 0.5, y: 1.0),
+            cropSide: 300,
+            fromScale: 1,
+            toScale: 2
+        )
+        XCTAssertEqual(result.height, -150, accuracy: 0.0001)
+        XCTAssertEqual(result.width, 0, accuracy: 0.0001)
+    }
+
+    /// 锚定后的偏移量必须仍然满足「图盖满取景框」。
+    /// 这是实际报的 bug：放大后取景框跑出了可见区域。
+    func testAnchoredOffsetStaysWithinPanLimits() {
+        let previewSize = CGSize(width: 1200, height: 1600)
+        let cropSide: CGFloat = 300
+        let minScale = max(cropSide / previewSize.width, cropSide / previewSize.height)
+
+        for anchorX in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let zoomed = ImageCropper.zoomedScale(lastScale: minScale, magnification: 3, minimumScale: minScale)
+            let anchored = ImageCropper.anchoredOffset(
+                offset: .zero,
+                startAnchor: UnitPoint(x: anchorX, y: 0.5),
+                cropSide: cropSide,
+                fromScale: minScale,
+                toScale: zoomed
+            )
+
+            // 复刻 ImageCropper.clamped 的限制
+            let maxX = max((previewSize.width * zoomed - cropSide) / 2, 0)
+            XCTAssertLessThanOrEqual(
+                abs(anchored.width), maxX + 0.0001,
+                "anchorX=\(anchorX) 时偏移超界，取景框会跑出图片"
+            )
         }
     }
 
