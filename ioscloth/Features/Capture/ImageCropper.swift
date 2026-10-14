@@ -38,8 +38,8 @@ struct ImageCropper: View {
     @State private var preview: UIImage?
     /// 取景框边长（由可用空间算出）
     @State private var cropSide: CGFloat = 300
-    /// 当前缩放倍数（由 UIKit 上报）
-    @State private var zoomScale: CGFloat = 0
+    /// 当前缩放平移（由 UIKit 上报）
+    @State private var transform = CropTransform.identity
     /// 「刚好填满取景框」的基准缩放倍数
     @State private var fitScale: CGFloat = 0
 
@@ -72,7 +72,7 @@ struct ImageCropper: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("完成") {
                     if let original, let preview {
-                        onDone(Self.crop(from: original, preview: preview, cropSide: cropSide, zoomScale: zoomScale, fitScale: fitScale))
+                        onDone(Self.crop(from: original, preview: preview, cropSide: cropSide, transform: transform, fitScale: fitScale))
                     } else if let original {
                         onDone(original)
                     }
@@ -85,6 +85,23 @@ struct ImageCropper: View {
         }
         .toolbarBackground(.black, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
+    }
+
+    /// 最终裁切结果的像素尺寸提示，例如「裁切框 1024 × 1024」
+    private var resultSizeHint: String {
+        guard let preview, let original, fitScale > 0 else { return " " }
+        let sideInPreview = Self.cropSideInImage(
+            cropSide: cropSide,
+            zoomScale: transform.zoomScale,
+            fitScale: fitScale
+        )
+        let sideInOriginal = Self.scaleToOriginal(
+            sideInPreview,
+            previewSize: preview.size,
+            originalSize: original.size
+        )
+        guard sideInOriginal > 1 else { return " " }
+        return "将保存 \(Int(sideInOriginal)) × \(Int(sideInOriginal)) 像素"
     }
 
     // MARK: - 编辑器
@@ -102,7 +119,7 @@ struct ImageCropper: View {
 
                 ZoomableCropView(
                     image: preview,
-                    onZoomScaleChange: { zoomScale = $0 },
+                    onTransformChange: { transform = $0 },
                     onFit: { fitScale = $0 }
                 )
                 .overlay {
@@ -113,9 +130,15 @@ struct ImageCropper: View {
                 .onChange(of: side) { _, newValue in cropSide = newValue }
             }
 
-            Text("双指缩放，单指拖动。直接点「完成」也行。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            VStack(spacing: 2) {
+                Text("双指缩放，单指拖动。直接点「完成」也行。")
+                    .font(.footnote)
+                // 让用户（和自己排查问题时）知道最终会存下多大的一块
+                Text(resultSizeHint)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(.secondary)
         }
     }
 }
@@ -129,12 +152,43 @@ extension ImageCropper {
     /// 对应图片里的 `cropSide / zoomScale` 个点。
     ///
     /// `fitScale` 是「刚好填满取景框」的基准缩放：在它之下不该发生
-    /// （`minimumZoomScale` 保证），真发生了就夹住，避免裁出比取景框更大的区域。
+    /// （`minimumZoomScale` 保证），真发生了就夹住。
     static func cropSideInImage(cropSide: CGFloat, zoomScale: CGFloat, fitScale: CGFloat) -> CGFloat {
         guard cropSide > 0, fitScale > 0 else { return 0 }
         let effective = max(zoomScale, fitScale)
         let side = cropSide / effective
         return side.isFinite ? side : 0
+    }
+
+    /// 取景框在**图片像素**里对应的矩形。
+    ///
+    /// 三个量全部由 `UIScrollView` 直接给出（缩放、contentOffset、可视尺寸），
+    /// 这里只做一次线性换算：屏幕中心 → 图片坐标。
+    ///
+    /// 推导：内容坐标 `c` 在滚动视图上的位置是 `c - contentOffset`，
+    /// 所以可视区中心（`viewportSize / 2`）对应的图片坐标是
+    /// `(viewportSize / 2 + contentOffset) / zoomScale`。
+    static func cropRectInImage(cropSide: CGFloat, transform: CropTransform, fitScale: CGFloat) -> CGRect {
+        let side = cropSideInImage(
+            cropSide: cropSide,
+            zoomScale: transform.zoomScale,
+            fitScale: fitScale
+        )
+        guard side > 0, transform.viewportSize.width > 0, transform.viewportSize.height > 0 else {
+            return .zero
+        }
+
+        let center = CGPoint(
+            x: (transform.viewportSize.width / 2 + transform.contentOffset.x) / transform.zoomScale,
+            y: (transform.viewportSize.height / 2 + transform.contentOffset.y) / transform.zoomScale
+        )
+
+        return CGRect(
+            x: center.x - side / 2,
+            y: center.y - side / 2,
+            width: side,
+            height: side
+        )
     }
 
     /// 预览图边长 → 原图对应的边长。两张图等比，按宽度比例线性映射即可。
@@ -145,33 +199,34 @@ extension ImageCropper {
 
     /// 从原图切出取景框对应的区域。
     ///
-    /// 取景框始终居中（`minimumZoomScale` 保证图片至少填满取景框，
-    /// 而居中由 `CropScrollView.centerContent` 负责），所以区域就是原图中央的正方形。
-    ///
     /// **保证返回一张图**：换算异常时退回整张原图，绝不返回 nil ——
     /// 否则用户点了「完成」会毫无反应，那是最让人困惑的失败方式。
     static func crop(
         from original: UIImage,
         preview: UIImage,
         cropSide: CGFloat,
-        zoomScale: CGFloat,
+        transform: CropTransform,
         fitScale: CGFloat
     ) -> UIImage {
         guard let cgImage = original.cgImage else { return original }
 
-        let sideInPreview = cropSideInImage(cropSide: cropSide, zoomScale: zoomScale, fitScale: fitScale)
-        guard sideInPreview > 1 else { return original }
+        let rectInPreview = cropRectInImage(cropSide: cropSide, transform: transform, fitScale: fitScale)
+        guard rectInPreview.width > 1, rectInPreview.height > 1 else { return original }
 
         let sideInOriginal = scaleToOriginal(
-            sideInPreview,
+            rectInPreview.width,
             previewSize: preview.size,
             originalSize: original.size
         )
         guard sideInOriginal > 1 else { return original }
 
+        let centerInOriginal = CGPoint(
+            x: (rectInPreview.midX / preview.size.width) * original.size.width,
+            y: (rectInPreview.midY / preview.size.height) * original.size.height
+        )
         let rect = CGRect(
-            x: (original.size.width - sideInOriginal) / 2,
-            y: (original.size.height - sideInOriginal) / 2,
+            x: centerInOriginal.x - sideInOriginal / 2,
+            y: centerInOriginal.y - sideInOriginal / 2,
             width: sideInOriginal,
             height: sideInOriginal
         ).integral.intersection(CGRect(origin: .zero, size: original.size))
@@ -180,6 +235,15 @@ extension ImageCropper {
         guard let cropped = cgImage.cropping(to: rect) else { return original }
         return UIImage(cgImage: cropped, scale: original.scale, orientation: .up)
     }
+}
+
+/// `UIScrollView` 当前的变换状态。三个量都是 UIKit 直接给的原始值。
+struct CropTransform: Equatable {
+    var zoomScale: CGFloat = 0
+    var contentOffset: CGPoint = .zero
+    var viewportSize: CGSize = .zero
+
+    static let identity = CropTransform()
 }
 
 // MARK: - 取景框

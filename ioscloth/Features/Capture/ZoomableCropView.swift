@@ -15,12 +15,13 @@ import UIKit
 /// 裁切矩形**不在这里算**。它由 `ImageCropper` 在图片坐标里算 —— 那里同时
 /// 持有原图和预览图，信息完整。这里只报一个标量（缩放倍数），少传数据少出错。
 ///
-/// 之前试过在这里用 `convert(_:to:)` 反推矩形、再反推回原图，结果把位置信息
-/// 弄丢了一半，绕了一大圈还是错。
+/// ⚠️ **缩放配置必须在 `layoutSubviews` 里做，不能在 `makeUIView` 里做。**
+/// `makeUIView` 时视图还没进层级，`bounds` 是 zero，算出来的
+/// `minimumZoomScale` 会是 0 或 NaN —— `UIScrollView` 会因此**完全不响应捏合**。
 struct ZoomableCropView: UIViewRepresentable {
     let image: UIImage
-    /// 用户缩放变化时上报当前缩放倍数
-    let onZoomScaleChange: (CGFloat) -> Void
+    /// 用户缩放 / 平移变化时上报当前变换
+    let onTransformChange: (CropTransform) -> Void
     /// 初始化完成后上报一次「刚好填满」的基准缩放倍数
     let onFit: (CGFloat) -> Void
 
@@ -30,37 +31,14 @@ struct ZoomableCropView: UIViewRepresentable {
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
         scrollView.bouncesZoom = true
-
-        let imageView = UIImageView(image: image)
-        imageView.frame = CGRect(origin: .zero, size: image.size)
-        scrollView.addSubview(imageView)
-        scrollView.contentSize = image.size
-        scrollView.imageView = imageView
-        scrollView.onZoom = onZoomScaleChange
-
-        scrollView.layoutIfNeeded()
-        let fitScale = max(
-            scrollView.bounds.width / image.size.width,
-            scrollView.bounds.height / image.size.height
-        )
-        guard fitScale.isFinite, fitScale > 0 else { return scrollView }
-
-        scrollView.minimumZoomScale = fitScale
-        scrollView.maximumZoomScale = fitScale * 8
-        scrollView.zoomScale = fitScale
-        scrollView.centerContent()
-
-        onFit(fitScale)
-        onZoomScaleChange(fitScale)
-
+        scrollView.decelerationRate = .fast
+        scrollView.image = image
+        scrollView.onTransform = onTransformChange
+        scrollView.onFit = onFit
         return scrollView
     }
 
-    func updateUIView(_ scrollView: CropScrollView, context: Context) {
-        // 布局定稿后 bounds 才会是最终值。`makeUIView` 时拿到的可能是临时尺寸，
-        // 那时算出来的居中会在最终布局里偏掉（实测偏了约 70pt）。
-        // 所以在尺寸真的变化时重新居中一次。
-    }
+    func updateUIView(_ scrollView: CropScrollView, context: Context) {}
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -69,55 +47,94 @@ struct ZoomableCropView: UIViewRepresentable {
 
 /// 负责缩放平移的 `UIScrollView`
 final class CropScrollView: UIScrollView, UIScrollViewDelegate {
-    weak var imageView: UIImageView?
-    /// 缩放变化时回调
-    var onZoom: ((CGFloat) -> Void)?
-    /// 上一次居中时用的可视尺寸，用来判断是否需要重新居中
-    private var lastCenteredBounds: CGSize = .zero
+    /// 待展示的图片。设置后会在下一次布局时装配
+    var image: UIImage? {
+        didSet { setNeedsLayout() }
+    }
+
+    var onTransform: ((CropTransform) -> Void)?
+    var onFit: ((CGFloat) -> Void)?
+
+    private var imageView: UIImageView?
+    /// 缩放范围只配置一次
+    private var isConfigured = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         delegate = self
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        // 每次布局都确认一下居中：bounds 在 `makeUIView` 时还没定稿
-        recenterIfNeeded()
+        // 提前给一个合法的（非零）缩放范围，避免系统在布局前就把手势禁掉
+        minimumZoomScale = 1
+        maximumZoomScale = 8
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
-
-    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        configureIfNeeded()
         centerContent()
-        onZoom?(zoomScale)
     }
 
-    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-        onZoom?(zoomScale)
-    }
+    /// 装配图片并设置缩放范围。**必须等到 bounds 有效**。
+    private func configureIfNeeded() {
+        guard let image, !isConfigured else { return }
+        guard bounds.width > 1, bounds.height > 1, image.size.width > 1, image.size.height > 1 else {
+            return
+        }
 
-    /// 可视尺寸变了就重新居中一次
-    func recenterIfNeeded() {
-        guard bounds.size != lastCenteredBounds else { return }
-        lastCenteredBounds = bounds.size
-        // 尺寸变化后 zoomScale 可能低于新的 minimumZoomScale，先夹住
-        if zoomScale < minimumZoomScale { zoomScale = minimumZoomScale }
-        centerContent()
-        onZoom?(zoomScale)
+        let imageView = UIImageView(image: image)
+        imageView.frame = CGRect(origin: .zero, size: image.size)
+        addSubview(imageView)
+        self.imageView = imageView
+        contentSize = image.size
+
+        // 「刚好填满取景框」的基准缩放
+        let fitScale = max(bounds.width / image.size.width, bounds.height / image.size.height)
+        guard fitScale.isFinite, fitScale > 0 else { return }
+
+        minimumZoomScale = fitScale
+        maximumZoomScale = fitScale * 8
+        zoomScale = fitScale
+        isConfigured = true
+
+        onFit?(fitScale)
+        report()
     }
 
     /// 内容小于可视区时居中。
-    /// 用 `contentInset` 而不是改 `imageView.frame`：后者会被 UIScrollView 在缩放中重置。
-    func centerContent() {
+    /// 用 `contentInset` 而不是改 `imageView.frame`：后者会被 `UIScrollView` 在缩放中重置。
+    private func centerContent() {
         guard let imageView else { return }
         let scaled = imageView.frame.size
         let horizontal = max((bounds.width - scaled.width) / 2, 0)
         let vertical = max((bounds.height - scaled.height) / 2, 0)
         contentInset = UIEdgeInsets(top: vertical, left: horizontal, bottom: vertical, right: horizontal)
-        lastCenteredBounds = bounds.size
+    }
+
+    // MARK: UIScrollViewDelegate
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        // 缩放中 bounds 会变，居中也要跟着更新
+        centerContent()
+        report()
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        report()
+    }
+
+    /// 把「用户当前看到的区域」需要的三个量报上去。
+    ///
+    /// 这里**刻意不做任何坐标系推演** —— 只报原始量，换算放在能单测的纯函数里。
+    /// 之前就是在这一层手算 `contentOffset`/`contentInset` 的关系，算错了中心点。
+    private func report() {
+        onTransform?(CropTransform(
+            zoomScale: zoomScale,
+            contentOffset: contentOffset,
+            viewportSize: bounds.size
+        ))
     }
 }
