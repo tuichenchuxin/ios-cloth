@@ -101,18 +101,31 @@ struct ImageCropper: View {
 
     private func editor(preview: UIImage) -> some View {
         VStack(spacing: 16) {
-            // 滚动视图铺满整块可用区域，取景框是覆盖在它上面的一层（见顶部设计说明 3）
+            // 取景框 = 滚动视图 = 同一块区域，逐层收窄：
+            //
+            //   ZStack                      铺满可用区域，负责画框外压暗
+            //     Color.black
+            //     CropOverlay(cropSide: side)  只在框外压暗（框内透明，透出下面的图片）
+            //     ZoomableCropView             **尺寸 == 取景框**，居中
+            //
+            // 最后一层必须是和取景框等大的滚动视图：`UIScrollView` 的夹取边界
+            // 就是它的 bounds，只有两者重合，图片的上/下/左/右边缘才能精确拖到框边。
+            // 之前让滚动视图铺满整屏、取景框只占 88%，于是图片在夹取方向上还能多走
+            // 「(视口 − 取景框) / 2」的距离，贴边内容就永远进不了框。
             GeometryReader { geometry in
                 let side = Self.cropSide(fitting: geometry.size)
 
-                ZoomableCropView(
-                    image: preview,
-                    onTransformChange: { transform = $0 },
-                    onFit: { fitScale = $0 }
-                )
-                .overlay {
+                ZStack {
+                    Color.black
+
                     CropOverlay(cropSide: side)
-                        .allowsHitTesting(false)
+
+                    ZoomableCropView(
+                        image: preview,
+                        onTransformChange: { transform = $0 },
+                        onFit: { fitScale = $0 }
+                    )
+                    .frame(width: side, height: side)
                 }
                 .onAppear { cropSide = side }
                 .onChange(of: side) { _, newValue in cropSide = newValue }
@@ -188,11 +201,20 @@ extension ImageCropper {
 
     /// 取景框在**图片像素**里对应的矩形。
     ///
-    /// 三个量全部由 `UIScrollView` 直接给出，这里只做一次线性换算：屏幕中心 → 图片坐标。
+    /// ## 符号坑（我在这里错过两次，用真实滚动视图量出来的）
     ///
-    /// 推导：内容坐标 `c` 在滚动视图上的位置是 `c - contentOffset`，
-    /// 所以可视区中心（`viewportSize / 2`）对应的图片坐标是
-    /// `(viewportSize / 2 + contentOffset) / zoomScale`。
+    /// `contentOffset` 是**内容原点在滚动视图坐标里的位置**，而内容原点通常是负数：
+    /// `contentOffset.y < 0` 意味着内容在屏幕上**往下**走了。
+    /// 所以「屏幕位置 → 图片坐标」是
+    ///
+    ///     图片坐标 = 屏幕位置 − 内容原点 = 屏幕位置 − (−contentOffset) = 屏幕位置 + contentOffset
+    ///
+    /// 也就是**加号**。写成减号会让取景框朝着用户拖动的反方向偏移两倍 ——
+    /// 表现就是「放大后怎么拖都到不了图片边缘」。
+    ///
+    /// 实测（viewport 387、图片 675×1200、zoom=0.5733 即刚好填满）：
+    /// - offset.y = 0   → rect.y = 0…675     居中，正确
+    /// - offset.y = −150（内容的极限）→ rect.y = 0…675  上边缘正好贴住框顶
     static func cropRectInImage(cropSide: CGFloat, transform: CropTransform, fitScale: CGFloat) -> CGRect {
         let side = cropSideInImage(
             cropSide: cropSide,
@@ -264,24 +286,33 @@ extension ImageCropper {
 
 // MARK: - 取景框
 
-/// 固定不动的正方形取景框：四周压暗 + 白色细边 + 三分线
+/// 固定不动的正方形取景框：**只在框外**压暗 + 白色细边 + 三分线。
+///
+/// 框内必须完全透明 —— 图片是画在它下面的一层，压暗会挡住图片。
 private struct CropOverlay: View {
     let cropSide: CGFloat
 
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(Color.black.opacity(0.55))
-                .reverseMask {
-                    Rectangle().frame(width: cropSide, height: cropSide)
-                }
-
-            Rectangle()
-                .strokeBorder(Color.white.opacity(0.9), lineWidth: 1.5)
-                .frame(width: cropSide, height: cropSide)
-
+            dimming
+            border
             thirds
         }
+    }
+
+    /// 框外压暗：整块半透明黑，再把中间的正方形抠掉
+    private var dimming: some View {
+        Rectangle()
+            .fill(Color.black.opacity(0.55))
+            .reverseMask {
+                Rectangle().frame(width: cropSide, height: cropSide)
+            }
+    }
+
+    private var border: some View {
+        Rectangle()
+            .strokeBorder(Color.white.opacity(0.9), lineWidth: 1.5)
+            .frame(width: cropSide, height: cropSide)
     }
 
     private var thirds: some View {

@@ -1,36 +1,39 @@
 import SwiftUI
 import UIKit
 
-/// 带固定正方形取景框的缩放平移视图。缩放平移全交给 `UIScrollView`。
+/// 可缩放平移的图片视图，缩放边界**严格等于**它的自身尺寸。
 ///
-/// ## 为什么用 UIKit 而不是 SwiftUI 手势
+/// ## 关键约束：这个视图的尺寸必须和取景框完全一致
+///
+/// iOS 上所有成熟裁切器的共同做法都是这一条。原因：
+/// `UIScrollView` 会把内容夹在 `[0, contentSize - bounds]` 之间，
+/// **夹取边界就是这个视图的边界**。如果这个视图比取景框大（比如铺满整屏而
+/// 取景框只占 88%），那么图片还能继续移动 `(视口 − 取景框) / 2` 的距离，
+/// 但取景框已经到头了 —— 表现就是「贴着边缘的内容怎么也拖不进框」。
+///
+/// 所以调用方必须把它放在和取景框**同一个矩形**里，用 `.overlay` 或
+/// `.frame` + `.offset` 对齐。
+///
+/// ## 缩放平移交给 UIKit，不自己写手势
 ///
 /// 之前用 SwiftUI 的 `MagnifyGesture` / `DragGesture` 自己算，踩了两个坑：
 /// 1. `startAnchor` 报的是**被缩放后的图片坐标系**，不是容器坐标 ——
-///    拿它当容器坐标做锚定，补偿量完全错，表现是「无论捏哪里，取景框都往右下漂」；
+///    拿它当容器坐标做锚定，补偿量完全错，表现是「无论捏哪里取景框都往同一方向漂」；
 /// 2. 两个手势同时改同一份 offset，互相打架。
-///
-/// ## 这个视图只负责一件事：把「用户当前的缩放倍数」报出去
-///
-/// 裁切矩形**不在这里算**。它由 `ImageCropper` 在图片坐标里算 —— 那里同时
-/// 持有原图和预览图，信息完整。这里只报一个标量（缩放倍数），少传数据少出错。
-///
-/// ⚠️ **缩放配置必须在 `layoutSubviews` 里做，不能在 `makeUIView` 里做。**
-/// `makeUIView` 时视图还没进层级，`bounds` 是 zero，算出来的
-/// `minimumZoomScale` 会是 0 或 NaN —— `UIScrollView` 会因此**完全不响应捏合**。
 struct ZoomableCropView: UIViewRepresentable {
     let image: UIImage
     /// 用户缩放 / 平移变化时上报当前变换
     let onTransformChange: (CropTransform) -> Void
-    /// 初始化完成后上报一次「刚好填满」的基准缩放倍数
+    /// 装配完成后上报「刚好填满」的基准缩放
     let onFit: (CGFloat) -> Void
 
     func makeUIView(context: Context) -> CropScrollView {
         let scrollView = CropScrollView()
-        scrollView.backgroundColor = .black
+        scrollView.backgroundColor = .clear
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
         scrollView.bouncesZoom = true
+        scrollView.bounces = true
         scrollView.decelerationRate = .fast
         scrollView.image = image
         scrollView.onTransform = onTransformChange
@@ -45,9 +48,14 @@ struct ZoomableCropView: UIViewRepresentable {
     final class Coordinator {}
 }
 
-/// 负责缩放平移的 `UIScrollView`
+/// 负责缩放平移的 `UIScrollView`。
+///
+/// **不使用 `contentInset` 做居中**。标准的「小内容居中」做法（改 inset）会引入
+/// 「inset 是否算进夹取范围」这类要靠实验才能确定的语义，而且 inset 在缩放过程中
+/// 反复变化会干扰手势。这里改成在 `layoutSubviews` 里直接摆正 `imageView` 的位置：
+/// 内容比自身小就居中，比自身大就把内容原点对齐自身原点 —— 两种情况的
+/// 夹取边界都精确落在自身边界上。
 final class CropScrollView: UIScrollView, UIScrollViewDelegate {
-    /// 待展示的图片。设置后会在下一次布局时装配
     var image: UIImage? {
         didSet { setNeedsLayout() }
     }
@@ -56,13 +64,12 @@ final class CropScrollView: UIScrollView, UIScrollViewDelegate {
     var onFit: ((CGFloat) -> Void)?
 
     private var imageView: UIImageView?
-    /// 缩放范围只配置一次
     private var isConfigured = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         delegate = self
-        // 提前给一个合法的（非零）缩放范围，避免系统在布局前就把手势禁掉
+        // 先给一个合法的非零范围，避免系统在布局前就把手势禁掉
         minimumZoomScale = 1
         maximumZoomScale = 8
     }
@@ -73,10 +80,11 @@ final class CropScrollView: UIScrollView, UIScrollViewDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         configureIfNeeded()
-        centerContent()
+        positionImageView()
+        report()
     }
 
-    /// 装配图片并设置缩放范围。**必须等到 bounds 有效**。
+    /// 装配图片并设置缩放范围。必须等到 bounds 有效（`makeUIView` 时还是 zero）。
     private func configureIfNeeded() {
         guard let image, !isConfigured else { return }
         guard bounds.width > 1, bounds.height > 1, image.size.width > 1, image.size.height > 1 else {
@@ -89,7 +97,7 @@ final class CropScrollView: UIScrollView, UIScrollViewDelegate {
         self.imageView = imageView
         contentSize = image.size
 
-        // 「刚好填满取景框」的基准缩放
+        // 「刚好填满」的基准缩放：保证两个方向都盖住自身，不会露白边
         let fitScale = max(bounds.width / image.size.width, bounds.height / image.size.height)
         guard fitScale.isFinite, fitScale > 0 else { return }
 
@@ -99,17 +107,34 @@ final class CropScrollView: UIScrollView, UIScrollViewDelegate {
         isConfigured = true
 
         onFit?(fitScale)
-        report()
     }
 
-    /// 内容小于可视区时居中。
-    /// 用 `contentInset` 而不是改 `imageView.frame`：后者会被 `UIScrollView` 在缩放中重置。
-    private func centerContent() {
+    /// 摆正图片位置：比自身小就居中，比自身大就原点对齐。
+    ///
+    /// 这样夹取边界永远精确等于自身边界 —— 图片的上/下/左/右边缘都能拖到框边。
+    private func positionImageView() {
         guard let imageView else { return }
         let scaled = imageView.frame.size
-        let horizontal = max((bounds.width - scaled.width) / 2, 0)
-        let vertical = max((bounds.height - scaled.height) / 2, 0)
-        contentInset = UIEdgeInsets(top: vertical, left: horizontal, bottom: vertical, right: horizontal)
+        imageView.frame.origin = CGPoint(
+            x: scaled.width < bounds.width ? (bounds.width - scaled.width) / 2 : 0,
+            y: scaled.height < bounds.height ? (bounds.height - scaled.height) / 2 : 0
+        )
+    }
+
+    /// 图片视图当前的 frame（单测诊断用）
+    var imageViewFrame: CGRect { imageView?.frame ?? .zero }
+
+    /// 当前变换。上报和单测共用同一份构造，避免两边算法漂移。
+    var currentTransform: CropTransform {
+        CropTransform(
+            zoomScale: zoomScale,
+            contentOffset: contentOffset,
+            viewportSize: bounds.size
+        )
+    }
+
+    private func report() {
+        onTransform?(currentTransform)
     }
 
     // MARK: UIScrollViewDelegate
@@ -117,24 +142,11 @@ final class CropScrollView: UIScrollView, UIScrollViewDelegate {
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
-        // 缩放中 bounds 会变，居中也要跟着更新
-        centerContent()
+        positionImageView()
         report()
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         report()
-    }
-
-    /// 把「用户当前看到的区域」需要的三个量报上去。
-    ///
-    /// 这里**刻意不做任何坐标系推演** —— 只报原始量，换算放在能单测的纯函数里。
-    /// 之前就是在这一层手算 `contentOffset`/`contentInset` 的关系，算错了中心点。
-    private func report() {
-        onTransform?(CropTransform(
-            zoomScale: zoomScale,
-            contentOffset: contentOffset,
-            viewportSize: bounds.size
-        ))
     }
 }

@@ -184,6 +184,73 @@ final class CaptureFlowTests: XCTestCase {
         )
     }
 
+    // MARK: - 裁切矩形换算（期望值全部来自实测）
+
+    /// 换算公式的数值必须和实测一致。
+    ///
+    /// 期望值不是推导出来的，是**用真实 `UIScrollView` 打印出来的**：
+    /// 取景框 = 视口 = 387、预览图 675×1200、zoom = 387/675（刚好填满）时，
+    /// 内容高 688pt，可滚动范围 0…301。
+    ///
+    ///   contentOffset.y = 0   → rect.y = 0…675       （显示图片上半部分）
+    ///   contentOffset.y = 150 → rect.y = 261.6…936.6 （往下滚）
+    ///
+    /// 关键点：**在刚好填满的缩放下，contentOffset 最小就是 0**，
+    /// 此时取景框上边缘正好对齐图片顶边 —— 也就是用户要的「把最上面的内容放进框」。
+    ///
+    /// 符号很容易搞反（我错过）：`contentOffset` 是内容原点在滚动视图坐标里的位置，
+    /// 所以「屏幕位置 → 图片坐标」是 `屏幕位置 + contentOffset`。
+    func testCropRectMatchesMeasuredValues() {
+        let side: CGFloat = 387
+        let fitScale: CGFloat = 387.0 / 675.0
+
+        func rect(offsetY: CGFloat) -> CGRect {
+            ImageCropper.cropRectInImage(
+                cropSide: side,
+                transform: CropTransform(
+                    zoomScale: fitScale,
+                    contentOffset: CGPoint(x: 0, y: offsetY),
+                    viewportSize: CGSize(width: side, height: side)
+                ),
+                fitScale: fitScale
+            )
+        }
+
+        // 实测：offset 为 0（刚好填满时能达到的最小值）→ 上边缘对齐框顶
+        let atTopEdge = rect(offsetY: 0)
+        XCTAssertEqual(atTopEdge.minY, 0, accuracy: 1, "实测 offset=0 → rect.y 从 0 开始")
+        XCTAssertEqual(atTopEdge.maxY, 675, accuracy: 1, "实测高度 675")
+
+        // 实测：offset=150 → rect.y = 261.6…936.6
+        let scrolled = rect(offsetY: 150)
+        XCTAssertEqual(scrolled.minY, 261.63, accuracy: 1, "实测值")
+        XCTAssertEqual(scrolled.maxY, 936.63, accuracy: 1, "实测值")
+
+        // 位移量 = offset 变化 / zoom
+        XCTAssertEqual(scrolled.minY - atTopEdge.minY, 150 / fitScale, accuracy: 1)
+    }
+
+    /// 随便取极端组合，取景框都必须是有限、正方、大小合理
+    func testCropRectIsAlwaysSaneSquare() {
+        let fitScale: CGFloat = 387.0 / 675.0
+        for offset in [-2000.0, -300.0, 0, 300.0, 2000.0] {
+            for multiplier in [1.0, 2.5, 8.0] {
+                let rect = ImageCropper.cropRectInImage(
+                    cropSide: 387,
+                    transform: CropTransform(
+                        zoomScale: fitScale * multiplier,
+                        contentOffset: CGPoint(x: offset, y: offset),
+                        viewportSize: CGSize(width: 387, height: 387)
+                    ),
+                    fitScale: fitScale
+                )
+                XCTAssertEqual(rect.width, rect.height, accuracy: 0.001, "必须是正方形")
+                XCTAssertGreaterThan(rect.width, 0)
+                XCTAssertTrue(rect.width.isFinite)
+            }
+        }
+    }
+
     // MARK: - 边长映射
 
     func testScaleToOriginalUsesWidthRatio() {
