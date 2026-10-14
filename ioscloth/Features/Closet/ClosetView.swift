@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UIKit
 
 struct ClosetView: View {
     @Environment(\.modelContext) private var context
@@ -7,7 +8,8 @@ struct ClosetView: View {
 
     @State private var filter = ClosetFilter()
     @State private var search = ""
-    @State private var isAdding = false
+    @State private var isCapturing = false
+    @State private var isAddingBlank = false
     @State private var editingItem: Clothing?
 
     private let columns = [GridItem(.adaptive(minimum: 108), spacing: 12)]
@@ -25,20 +27,44 @@ struct ClosetView: View {
             .searchable(text: $search, prompt: "名称 / 颜色 / 子类")
             .safeAreaInset(edge: .top) { filterBar }
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        isAdding = true
-                    } label: {
-                        Label("添加", systemImage: "plus")
-                    }
-                }
+                ToolbarItem(placement: .primaryAction) { addMenu }
             }
-            .sheet(isPresented: $isAdding) {
-                ClothingEditView(clothing: nil)
+            .fullScreenCover(isPresented: $isCapturing) {
+                // ⚠️ 录入**只有这一条路**。
+                // 这里曾经另外挂过一个 `.photosPicker` + `.sheet(mode: .singlePhoto)`，
+                // 结果相册走那条老路、拍照走 CaptureFlowView，两套代码行为不一致：
+                // 相册会跳过裁切页、也没有「保存并继续」。
+                // 新增录入方式时请一律加进 CaptureFlowView 的入口页，不要再在这里并行开一条。
+                CaptureFlowView { isCapturing = false }
+            }
+            .sheet(isPresented: $isAddingBlank) {
+                ClothingEditView(mode: .singlePhoto)
             }
             .sheet(item: $editingItem) { item in
-                ClothingEditView(clothing: item)
+                ClothingEditView(clothing: item, mode: .editing)
             }
+        }
+    }
+
+    /// 添加衣物的入口。
+    private var addMenu: some View {
+        Menu {
+            Button {
+                isCapturing = true
+            } label: {
+                Label("拍照 / 从相册录入", systemImage: "camera.fill")
+            }
+
+            Divider()
+
+            Button {
+                editingItem = nil
+                isAddingBlank = true
+            } label: {
+                Label("手动新建（不拍照）", systemImage: "square.and.pencil")
+            }
+        } label: {
+            Label("添加", systemImage: "plus")
         }
     }
 
@@ -146,13 +172,13 @@ struct ClosetView: View {
             Label(allItems.isEmpty ? "衣柜还是空的" : "没有符合条件的衣服", systemImage: "tshirt")
         } description: {
             if allItems.isEmpty {
-                Text("点右上角 + 添加第一件衣服。\n先只填「分类 + 季节 + 温度」就能开始用，细节以后再补。")
+                Text("点右上角 + 开始录入。\n同一季的衣服可以连着拍，季节和温度会自动沿用上一件。")
             } else {
                 Text("换个筛选条件，或清空搜索关键词。")
             }
         } actions: {
             if allItems.isEmpty {
-                Button("添加衣物") { isAdding = true }
+                Button("拍照录入") { isCapturing = true }
                     .buttonStyle(.borderedProminent)
             } else {
                 Button("清除筛选") { filter = ClosetFilter() }

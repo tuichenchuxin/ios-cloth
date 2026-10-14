@@ -3,33 +3,98 @@ import SwiftData
 import PhotosUI
 import UIKit
 
-/// 新建 / 编辑一件衣物。
+/// 新建 / 编辑一件衣物，也是「批量录入」流程的最后一步。
 ///
 /// 交互原则（DESIGN.md §5.2）：**所有字段都有默认值，能直接保存**。
 /// 名称、品牌、价格都可以留空 —— 先让衣服进得来，细节以后再补。
 struct ClothingEditView: View {
+
+    /// 表单的工作模式
+    enum Mode {
+        /// 编辑已有衣物
+        case editing
+        /// 拍完第一件，表单里季节/温度/场景是空的
+        case firstInBatch
+        /// 批量继续：季节/温度/场景继承上一件，省掉重复点击
+        case continuingBatch
+        /// 从相册选的单张照片
+        case singlePhoto
+
+        var isEditing: Bool {
+            if case .editing = self { return true }
+            return false
+        }
+
+        var title: String {
+            switch self {
+            case .editing: "编辑衣物"
+            case .firstInBatch, .continuingBatch: "添加衣物"
+            case .singlePhoto: "添加衣物"
+            }
+        }
+
+        var isBatch: Bool {
+            switch self {
+            case .firstInBatch, .continuingBatch: return true
+            case .editing, .singlePhoto: return false
+            }
+        }
+    }
+
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
 
     /// nil = 新建
     let clothing: Clothing?
+    /// 拍照/相册来的图片；有它就锁住，不允许再换（要换就退出重来，避免流程分叉）
+    let capturedImage: UIImage?
+    let mode: Mode
+    /// 保存成功后的回调。
+    /// - `continueBatch`：批量模式下用户点的是「保存并继续」
+    /// - `draft`：刚保存的草稿，用来给下一件继承季节/温度/场景
+    let onSaved: ((_ continueBatch: Bool, _ draft: Draft) -> Void)?
+    /// 用户放弃编辑时的回调。
+    ///
+    /// 为什么需要它：这个视图被嵌在 `CaptureFlowView` 里时，它的「上滑消失」是由父级
+    /// 的 `isFormPresented` 控制的。如果它自己调 `dismiss()`，父级的状态不会跟着变，
+    /// 下一次就再也弹不出来了。所以在流程里由父级接管，单独使用时才退回默认 dismiss。
+    let onCancel: (() -> Void)?
 
     @State private var draft = Draft()
     @State private var pickerItem: PhotosPickerItem?
     @State private var pickedImage: UIImage?
     @State private var isSaving = false
     @State private var errorMessage: String?
+    @FocusState private var isNameFocused: Bool
 
-    private var isEditing: Bool { clothing != nil }
+    init(
+        clothing: Clothing? = nil,
+        capturedImage: UIImage? = nil,
+        mode: Mode = .editing,
+        seed: Draft? = nil,
+        onSaved: ((_ continueBatch: Bool, _ draft: Draft) -> Void)? = nil,
+        onCancel: (() -> Void)? = nil
+    ) {
+        self.clothing = clothing
+        self.capturedImage = capturedImage
+        self.mode = mode
+        self.onSaved = onSaved
+        self.onCancel = onCancel
+        _draft = State(initialValue: seed ?? Draft())
+    }
 
-    private static let temperaturePresets: [(String, Double, Double)] = [
-        ("严寒", -15, 0),
-        ("冷", -5, 10),
-        ("凉", 5, 18),
-        ("舒适", 15, 25),
-        ("热", 22, 32),
-        ("炎热", 28, 40)
-    ]
+    /// 关闭表单：优先交给父级，没父级就自己关
+    private func close() {
+        if let onCancel { onCancel() } else { dismiss() }
+    }
+
+    /// 当前要展示的照片：优先拍照来的，其次相册刚选的，最后是已保存的
+    private var displayImage: UIImage? {
+        capturedImage ?? pickedImage
+    }
+
+    /// 有图就不用再给相册入口（避免两条路径同时存在）
+    private var showsPhotoPicker: Bool { capturedImage == nil }
 
     var body: some View {
         NavigationStack {
@@ -40,7 +105,7 @@ struct ClothingEditView: View {
                 temperatureSection
                 styleSection
                 statusSection
-                if isEditing {
+                if mode.isEditing {
                     Section {
                         Button(role: .destructive) {
                             deleteItem()
@@ -50,18 +115,19 @@ struct ClothingEditView: View {
                     }
                 }
             }
-            .navigationTitle(isEditing ? "编辑衣物" : "添加衣物")
+            .navigationTitle(mode.title)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar { toolbarContent }
+            // 底部工具栏的「保存并结束」会被键盘盖住，所以给键盘配一个收起按钮，
+            // 用户随时能收掉键盘再去点它。（表单本身也支持下滑收起键盘。）
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") { Task { await save() } }
-                        .disabled(isSaving)
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("收起键盘") { isNameFocused = false }
                 }
             }
-            .alert("保存失败", isPresented: Binding(
+            .scrollDismissesKeyboard(.interactively)
+            .alert("出错了", isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
             )) {
@@ -81,6 +147,34 @@ struct ClothingEditView: View {
         }
     }
 
+    // MARK: - 工具栏
+    //
+    // 批量模式的精髓全在这里：`保存并继续` 存完立刻回到相机，季节/温度/场景原样保留。
+    // 同一季的衣服连拍，每件只需要「拍一张 → 点一下」。
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            Button(mode.isEditing ? "取消" : "返回") { close() }
+        }
+
+        if mode.isBatch {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("保存并继续") { Task { await save(continueBatch: true) } }
+                    .disabled(isSaving)
+            }
+            ToolbarItem(placement: .bottomBar) {
+                Button("保存并结束") { Task { await save(continueBatch: false) } }
+                    .disabled(isSaving)
+            }
+        } else {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("保存") { Task { await save(continueBatch: false) } }
+                    .disabled(isSaving)
+            }
+        }
+    }
+
     // MARK: - 区块
 
     private var photoSection: some View {
@@ -89,8 +183,8 @@ struct ClothingEditView: View {
                 Spacer()
                 VStack(spacing: 12) {
                     Group {
-                        if let pickedImage {
-                            Image(uiImage: pickedImage)
+                        if let displayImage {
+                            Image(uiImage: displayImage)
                                 .resizable()
                                 .scaledToFill()
                         } else if let clothing, !clothing.imageFile.isEmpty || !clothing.thumbFile.isEmpty {
@@ -111,20 +205,22 @@ struct ClothingEditView: View {
                     .frame(width: 200, height: 200)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
 
-                    HStack(spacing: 16) {
-                        PhotosPicker(selection: $pickerItem, matching: .images) {
-                            Label(pickedImage == nil && clothing == nil ? "选照片" : "换照片", systemImage: "photo")
-                        }
-                        if pickedImage != nil {
-                            Button(role: .destructive) {
-                                pickedImage = nil
-                                pickerItem = nil
-                            } label: {
-                                Label("撤销", systemImage: "arrow.uturn.backward")
+                    if showsPhotoPicker {
+                        HStack(spacing: 16) {
+                            PhotosPicker(selection: $pickerItem, matching: .images) {
+                                Label(displayImage == nil ? "选照片" : "换照片", systemImage: "photo")
+                            }
+                            if pickedImage != nil {
+                                Button(role: .destructive) {
+                                    pickedImage = nil
+                                    pickerItem = nil
+                                } label: {
+                                    Label("撤销", systemImage: "arrow.uturn.backward")
+                                }
                             }
                         }
+                        .font(.footnote)
                     }
-                    .font(.footnote)
                 }
                 Spacer()
             }
@@ -137,6 +233,8 @@ struct ClothingEditView: View {
     private var basicSection: some View {
         Section("基本信息") {
             TextField("名称（可留空，会自动生成）", text: $draft.name)
+                .accessibilityIdentifier("衣物名称输入框")
+                .focused($isNameFocused)
 
             Picker("分类", selection: $draft.category) {
                 ForEach(ClothingCategory.allCases) { category in
@@ -190,14 +288,14 @@ struct ClothingEditView: View {
         Section {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(Self.temperaturePresets, id: \.0) { preset in
+                    ForEach(Draft.temperaturePresets, id: \.name) { preset in
                         Button {
-                            draft.tempMin = preset.1
-                            draft.tempMax = preset.2
+                            draft.tempMin = preset.min
+                            draft.tempMax = preset.max
                         } label: {
                             FilterChip(
-                                title: "\(preset.0) \(Int(preset.1))~\(Int(preset.2))°",
-                                isActive: draft.tempMin == preset.1 && draft.tempMax == preset.2
+                                title: "\(preset.name) \(Int(preset.min))~\(Int(preset.max))°",
+                                isActive: draft.tempMin == preset.min && draft.tempMax == preset.max
                             )
                         }
                         .buttonStyle(.plain)
@@ -283,7 +381,7 @@ struct ClothingEditView: View {
         }
     }
 
-    private func save() async {
+    private func save(continueBatch: Bool) async {
         isSaving = true
         defer { isSaving = false }
 
@@ -297,9 +395,9 @@ struct ClothingEditView: View {
         }
 
         // 先存图片，再存数据 —— 这样库里不会出现指向不存在文件的引用
-        if let pickedImage {
+        if let image = displayImage {
             do {
-                let names = try await ImageStore.shared.save(pickedImage, id: target.id)
+                let names = try await ImageStore.shared.save(image, id: target.id)
                 target.imageFile = names.main
                 target.thumbFile = names.thumb
             } catch {
@@ -317,7 +415,9 @@ struct ClothingEditView: View {
             errorMessage = "写入失败：\(error.localizedDescription)"
             return
         }
-        dismiss()
+
+        onSaved?(continueBatch, draft)
+        close()
     }
 
     private func deleteItem() {
@@ -334,7 +434,7 @@ struct ClothingEditView: View {
             return
         }
         Task { await ImageStore.shared.deleteAll(main: main, thumb: thumb, cutout: cutout) }
-        dismiss()
+        close()
     }
 }
 
@@ -342,6 +442,8 @@ struct ClothingEditView: View {
 //
 // 为什么不直接绑定 `Clothing`：`@Model` 对象的字段直接双向绑定容易在
 // 「取消」时留下脏数据。这里用一份值类型草稿，点保存才写回去。
+//
+// 批量录入靠它实现「继承上一件」：保存后把不带图片/名称的部分传给下一件。
 
 extension ClothingEditView {
     struct Draft {
@@ -358,6 +460,15 @@ extension ClothingEditView {
         var isFavorite = false
         var status: ClothingStatus = .wearing
         var note = ""
+
+        static let temperaturePresets: [(name: String, min: Double, max: Double)] = [
+            ("严寒", -15, 0),
+            ("冷", -5, 10),
+            ("凉", 5, 18),
+            ("舒适", 15, 25),
+            ("热", 22, 32),
+            ("炎热", 28, 40)
+        ]
 
         init() {}
 
@@ -391,6 +502,29 @@ extension ClothingEditView {
             item.isFavorite = isFavorite
             item.status = status
             item.note = note
+        }
+
+        /// 下一件要继承的部分：只留「同一季的衣服通常一样」的字段。
+        ///
+        /// 刻意不继承 `name` / `subcategory`（每件都不一样）、
+        /// `isFavorite`（这是个偏个人的标记）、`note`。
+        func inherited() -> Draft {
+            var next = Draft()
+            next.category = category
+            next.colorName = colorName
+            next.brand = brand
+            next.seasons = seasons
+            next.tempMin = tempMin
+            next.tempMax = tempMax
+            next.isLayerable = isLayerable
+            next.styleTags = styleTags
+            next.status = status
+            return next
+        }
+
+        /// 带内容的草稿才值得继承 —— 第一件录完是空的，跟不跟都一样
+        var hasInheritableContent: Bool {
+            !seasons.isEmpty || !styleTags.isEmpty || tempMin != 15 || tempMax != 26
         }
     }
 }

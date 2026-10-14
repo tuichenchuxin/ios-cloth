@@ -9,12 +9,12 @@
 | 里程碑 | 状态 |
 |---|---|
 | M0 工程地基（XcodeGen + 签名 + 跑通模拟器） | ✅ 完成 |
-| M1 数据层（SwiftData 模型 + 图片落盘 + 推荐引擎 + 56 个单测） | ✅ 完成 |
-| M2 录入流程（相机 + 裁切 + **批量继续**） | ⬜ 下一步 |
-| M3 衣柜浏览（图墙筛选已在 M1 顺带做了） | ⬜ |
-| M4 推荐（引擎与搭配卡已在 M1 顺带做了） | ⬜ |
+| M1 数据层（SwiftData 模型 + 图片落盘 + 推荐引擎 + 70 个单测） | ✅ 完成 |
+| M2 录入流程（相机 + 裁切 + **保存并继续**批量录入 + 3 条 UI 端到端测试） | ✅ 完成 |
+| M3 衣柜浏览（图墙/筛选/搜索已可用；温度筛选、批量改状态待做） | 🟡 部分 |
+| M4 推荐（引擎/打分/理由/换一套已可用；多层搭配待做） | 🟡 部分 |
 | M5 穿着记录与反馈 | ⬜ |
-| M6 真机 / 发布 | ⬜ |
+| M6 真机 | ✅ **已装到「陈出新的iPhone」** |
 
 ## 环境（本机实测）
 
@@ -59,7 +59,32 @@ xcrun simctl launch "iPhone 17 Pro Max" com.chuxinchen.ioscloth
 > 用 `-configuration Release` 装模拟器：Xcode 17+ 的 Debug 产物带 `.debug.dylib`，
 > `simctl launch` 会被 SBMainWorkspace 拒绝。
 
+端到端 UI 测试（会真的点界面，约 2 分钟）：
+
+```bash
+xcodebuild test -project ioscloth.xcodeproj -scheme ioscloth \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max,OS=latest' \
+  -only-testing:iosclothUITests
+```
+
+> UI 测试要求模拟器相册里有照片。空的就先塞一张：
+> `xcrun simctl addmedia "iPhone 17 Pro Max" 某张图.png`
+
 也可以直接 `open ioscloth.xcodeproj` 用 Xcode 跑。
+
+## 装到真机（7 天一次）
+
+用的是免费 Personal Team 证书（`M7GUVHHD97`），**装到真机上只能撑 7 天**，到期 App 打不开，重跑脚本即可：
+
+```bash
+./scripts/install-to-device.sh
+```
+
+前提：手机连上 Mac、解锁、信任过这台电脑。免费账号还有两个限制：
+- 同时最多装 3 个 App（你的 RSSReader 已占 1 个）；
+- 换手机/重装系统后要重新配对。
+
+想一次解决，就买 $99/年的 Apple Developer Program。
 
 ## 已知噪音（不是 bug）
 

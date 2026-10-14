@@ -23,4 +23,18 @@ extension UIImage {
     func jpegData(quality: CGFloat) -> Data? {
         jpegData(compressionQuality: quality)
     }
+
+    /// 把 `imageOrientation` 拍平。
+    ///
+    /// 相机和相册的图常常带一个方向标记（`size` 是未旋转的原始尺寸），
+    /// 直接按 `size` 算裁切矩形会错位。所以裁切前先重绘一遍，让 `size` 和实际朝向一致。
+    func upright() -> UIImage {
+        guard imageOrientation != .up else { return self }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = scale
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            draw(in: CGRect(origin: .zero, size: size))
+        }
+    }
 }

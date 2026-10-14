@@ -22,20 +22,27 @@
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
 | M0 工程地基 | ✅ | XcodeGen + `project.yml`，模拟器编译运行通过 |
-| M1 数据层 | ✅ | SwiftData 模型、`ImageStore`、`OutfitEngine`、`BackupService`，**56 个单测全绿** |
-| M2 录入流程 | ⬜ 下一步 | 相机 + 裁切 + 「批量继续」。M1 阶段先只有「从相册选一张」 |
+| M1 数据层 | ✅ | SwiftData 模型、`ImageStore`、`OutfitEngine`、`BackupService`，**70 个单测全绿** |
+| M2 录入流程 | ✅ | 相机 + 裁切 + 「保存并继续」批量录入；**3 条 UI 端到端测试**覆盖主链路 |
 | M3 衣柜浏览 | 🟡 部分 | 图墙 + 分类/季节/状态筛选 + 搜索已可用；温度区间筛选、批量改状态待做 |
-| M4 推荐 | 🟡 部分 | 引擎 + 打分 + 理由文案 + 换一套 + 就这套已可用；多层搭配待做（见下） |
+| M4 推荐 | 🟡 部分 | 引擎 + 打分 + 理由文案 + 换一套 + 就这套已可用；多层搭配待做 |
 | M5 穿着记录与反馈 | ⬜ | 表结构已就位，UI 未做 |
-| M6 真机 / 发布 | ⬜ | 已定：先只跑模拟器 |
+| M6 真机 | ✅ | 已装到「陈出新的iPhone」（iOS 27.0.1）。免费证书，**7 天需重装**，见 `scripts/install-to-device.sh` |
 
-**M1 阶段发现并修掉的两个真 bug**（值得记住，将来重构别再踩）：
+### 已知的坑（都是真机上暴露出来的，改之前先读）
 
-1. 删除衣物时 `OutfitItem.clothing` **不会**自动置空 —— 光靠 `@Relationship(deleteRule:)` 不可靠，
-   必须显式置空（`ClothingService.delete`），否则搭配卡会指向已删除对象。
-2. `context.delete(model:)` **批量删除会抛错**：
-   `Constraint trigger violation: Batch delete failed due to mandatory OTO nullify inverse on OutfitItem/outfit`。
-   必须逐条 `context.delete(_:)` 让对象图逻辑走完整。
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 删衣物后搭配卡指向已删除对象 | `OutfitItem.clothing` 的 `@Relationship(deleteRule:)` 在这条边上不可靠 | `ClothingService.delete` 里显式置空 |
+| 2 | `清空全部数据` 直接抛错 | `context.delete(model:)` 是 SQL 级批量删除，绕过级联规则，撞上 `mandatory OTO nullify inverse` 约束 | 逐条 `context.delete(_:)` |
+| 3 | 裁切时可能吃爆内存 | `CGRect.intersection` 在两矩形不相交时返回 **`.infinite`** 而不是 `.null`，而 `isNull` 对 infinite 是 false | 额外校验 `isFinite` |
+| 4 | **点相机「使用照片」后什么都没发生** | 相机自己 `@Environment(\.dismiss)`，而它被包在 `fullScreenCover(isPresented: .constant(true))` 里 —— 相机一关把整个 cover 一起拆掉，刚出现的裁切页被连带销毁 | 模态结构重排：相机用 cover、裁切用 push、表单用 sheet，**任何子视图不自己 dismiss**（见 `CaptureFlowView` 顶部注释） |
+| 5 | 相册入口跳过裁切页、也没有「保存并继续」 | `ClosetView` 里另外挂着一个 `.photosPicker` + `.sheet(mode: .singlePhoto)`，**绕过了 `CaptureFlowView` 状态机**，导致相册和拍照走两套代码 | 删掉并行那条路，录入只保留 `CaptureFlowView` 一个入口 |
+| 6 | **录完点保存没反应／没存进去** | 「保存并结束」在底部工具栏，**被键盘盖住**，点不到 | 表单加 `.keyboard` 工具栏「收起键盘」，并 `.scrollDismissesKeyboard(.interactively)` |
+| 7 | UI 测试之间互相污染 | 数据持久化，上一条测试存的衣物影响下一条的断言 | App 支持 `-uitest-reset-data` 启动参数（仅供测试） |
+
+> 第 4～6 条都**只在真机/真交互下才暴露**，单测完全覆盖不到。
+> 这也是为什么这个项目从 M2 起就配了 UI 端到端测试（`iosclothUITests/`）。
 
 ---
 
