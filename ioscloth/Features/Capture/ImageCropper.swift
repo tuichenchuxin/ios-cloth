@@ -114,19 +114,47 @@ struct ImageCropper: View {
             // 「(视口 − 取景框) / 2」的距离，贴边内容就永远进不了框。
             GeometryReader { geometry in
                 let side = Self.cropSide(fitting: geometry.size)
+                let windowOrigin = CGPoint(
+                    x: (geometry.size.width - side) / 2,
+                    y: (geometry.size.height - side) / 2
+                )
 
-                ZStack {
+                ZStack(alignment: .topLeading) {
                     Color.black
 
-                    CropOverlay(cropSide: side)
+                    // 框外也显示同一张图（只是被压暗），这样能看到照片的其余部分，
+                    // 方便判断主体在整张照片里的位置。
+                    //
+                    // 关键在于它必须和框内的图片**共用同一个变换**，
+                    // 否则框内外会对不上、看起来像两张不同的图。
+                    Image(uiImage: preview)
+                        // 必须 resizable：否则 Image 按原始点尺寸绘制（675×1200pt），
+                        // frame 只约束布局不缩放内容，框内外就对不上了。
+                        .resizable()
+                        .interpolation(.medium)
+                        .frame(
+                            width: preview.size.width * transform.zoomScale,
+                            height: preview.size.height * transform.zoomScale
+                        )
+                        .offset(
+                            x: windowOrigin.x - transform.contentOffset.x,
+                            y: windowOrigin.y - transform.contentOffset.y
+                        )
 
+                    // 框内：可缩放平移的图片，尺寸严格等于取景框（见 ZoomableCropView 注释）
                     ZoomableCropView(
                         image: preview,
                         onTransformChange: { transform = $0 },
                         onFit: { fitScale = $0 }
                     )
                     .frame(width: side, height: side)
+                    .position(x: windowOrigin.x + side / 2, y: windowOrigin.y + side / 2)
+
+                    // 框外压暗 + 白边 + 三分线（框内透明，透出下面的图片）
+                    CropOverlay(cropSide: side)
+                        .allowsHitTesting(false)
                 }
+                .clipped()
                 .onAppear { cropSide = side }
                 .onChange(of: side) { _, newValue in cropSide = newValue }
             }

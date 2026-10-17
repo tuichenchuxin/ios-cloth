@@ -133,12 +133,14 @@ extension ClothingEditView {
         var seasons: [Season] = []
         var tempMin: Double = 15
         var tempMax: Double = 26
-        var isLayerable = false
+        /// 已勾选的温度档位。多选时取并集，拼出最终区间。
+        var presetNames: [String] = []
         var styleTags: [StyleTag] = []
         var isFavorite = false
         var status: ClothingStatus = .wearing
         var note = ""
 
+        /// 温度档位。多选时取并集 —— 例如勾「冷(-5~10)」+「凉(5~18)」得到 −5~18。
         static let temperaturePresets: [(name: String, min: Double, max: Double)] = [
             ("严寒", -15, 0),
             ("冷", -5, 10),
@@ -159,11 +161,35 @@ extension ClothingEditView {
             seasons = item.seasons
             tempMin = item.tempMin
             tempMax = item.tempMax
-            isLayerable = item.isLayerable
+            // 反推：完全落在 [tempMin, tempMax] 里的档位视为已选
+            presetNames = Self.temperaturePresets
+                .filter { $0.min >= item.tempMin && $0.max <= item.tempMax }
+                .map(\.name)
             styleTags = item.styleTags
             isFavorite = item.isFavorite
             status = item.status
             note = item.note
+        }
+
+        func isPresetSelected(_ preset: (name: String, min: Double, max: Double)) -> Bool {
+            presetNames.contains(preset.name)
+        }
+
+        /// 切换一个温度档位，并把区间重算成「所有已选档位的并集」。
+        ///
+        /// 取消最后一个档位时保留当前区间 —— 用户可能已经手动微调过，
+        /// 不该因为取消勾选就把值重置掉。
+        mutating func togglePreset(_ preset: (name: String, min: Double, max: Double)) {
+            if let index = presetNames.firstIndex(of: preset.name) {
+                presetNames.remove(at: index)
+            } else {
+                presetNames.append(preset.name)
+            }
+
+            let selected = Self.temperaturePresets.filter { presetNames.contains($0.name) }
+            guard !selected.isEmpty else { return }
+            tempMin = selected.map(\.min).min() ?? tempMin
+            tempMax = selected.map(\.max).max() ?? tempMax
         }
 
         func apply(to item: Clothing) {
@@ -175,7 +201,6 @@ extension ClothingEditView {
             item.seasons = seasons
             item.tempMin = min(tempMin, tempMax)
             item.tempMax = max(tempMin, tempMax)
-            item.isLayerable = isLayerable
             item.styleTags = styleTags
             item.isFavorite = isFavorite
             item.status = status
@@ -194,7 +219,7 @@ extension ClothingEditView {
             next.seasons = seasons
             next.tempMin = tempMin
             next.tempMax = tempMax
-            next.isLayerable = isLayerable
+            next.presetNames = presetNames
             next.styleTags = styleTags
             next.status = status
             return next

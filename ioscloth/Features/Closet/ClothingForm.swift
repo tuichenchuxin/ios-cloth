@@ -218,12 +218,11 @@ struct ClothingForm: View {
                 HStack(spacing: 8) {
                     ForEach(ClothingEditView.Draft.temperaturePresets, id: \.name) { preset in
                         Button {
-                            draft.tempMin = preset.min
-                            draft.tempMax = preset.max
+                            draft.togglePreset(preset)
                         } label: {
                             FilterChip(
                                 title: "\(preset.name) \(Int(preset.min))~\(Int(preset.max))°",
-                                isActive: draft.tempMin == preset.min && draft.tempMax == preset.max
+                                isActive: draft.isPresetSelected(preset)
                             )
                         }
                         .buttonStyle(.plain)
@@ -234,12 +233,10 @@ struct ClothingForm: View {
 
             Stepper("最低 \(Int(draft.tempMin))°C", value: $draft.tempMin, in: -30...45, step: 1)
             Stepper("最高 \(Int(draft.tempMax))°C", value: $draft.tempMax, in: -30...45, step: 1)
-
-            Toggle("可叠穿（打底 / 开衫 / 薄外套）", isOn: $draft.isLayerable)
         } header: {
-            Text("适合的温度区间")
+            Text("适合的温度区间（可多选）")
         } footer: {
-            Text("这是「什么天气适合穿它」。推荐时会拿当天温度落进这个区间来筛。")
+            Text("上面几档是快捷选择，**可以多选**：同时勾「冷」和「凉」会拼成 −5~18°C。下面的最低/最高永远等于拼出来的结果，也可以再单独微调。")
         }
         .onChange(of: draft.tempMin) { _, newValue in
             if newValue > draft.tempMax { draft.tempMax = newValue }

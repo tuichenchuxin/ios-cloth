@@ -14,12 +14,13 @@ struct OutfitCardView: View {
                 HStack(alignment: .top, spacing: 10) {
                     ForEach(draft.orderedAssignments, id: \.slot) { entry in
                         VStack(spacing: 4) {
-                            PhotoThumbnailView(
+                            TappablePhoto(
+                                mainName: entry.item.imageFile,
                                 thumbName: entry.item.thumbFile,
-                                mainName: entry.item.imageFile
+                                title: entry.item.displayName,
+                                size: 100,
+                                cornerRadius: 10
                             )
-                            .frame(width: 100, height: 100)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
 
                             Text(entry.slot.displayName)
                                 .font(.caption2)

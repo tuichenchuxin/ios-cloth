@@ -37,7 +37,6 @@ final class CaptureFlowUITests: XCTestCase {
         fillName(app, "UI测试用上衣")
         app.buttons["春"].firstMatch.tap()
 
-        dismissKeyboard(app)
         tapSave(app, "保存并结束")
 
         // 保存并结束 → 回到衣柜，能看到刚录入的衣服
@@ -64,7 +63,6 @@ final class CaptureFlowUITests: XCTestCase {
         fillName(app, "相册批量第一件")
         app.buttons["冬"].firstMatch.tap()
 
-        dismissKeyboard(app)
         tapSave(app, "保存并继续")
 
         // 关键断言：相册又弹出来了（而不是跳到相机）
@@ -93,7 +91,6 @@ final class CaptureFlowUITests: XCTestCase {
         app.buttons["冬"].firstMatch.tap()
         app.buttons["冷 -5~10°"].firstMatch.tap()
 
-        dismissKeyboard(app)
         tapSave(app, "保存并继续")
 
         // 从相册来源的「保存并继续」直接回到相册，可以立刻选第二张
@@ -115,7 +112,6 @@ final class CaptureFlowUITests: XCTestCase {
         XCTAssertTrue(temperatureChip.isHittable)
 
         fillName(app, "继承结果")
-        dismissKeyboard(app)
         tapSave(app, "保存并结束")
 
         XCTAssertTrue(app.navigationBars["衣柜"].waitForExistence(timeout: 20))
@@ -151,7 +147,6 @@ final class CaptureFlowUITests: XCTestCase {
         doneButton.tap()
 
         fillName(app, "缩放后裁切")
-        dismissKeyboard(app)
         tapSave(app, "保存并结束")
 
         XCTAssertTrue(app.navigationBars["衣柜"].waitForExistence(timeout: 20))
@@ -173,7 +168,6 @@ final class CaptureFlowUITests: XCTestCase {
         confirmCrop(app)
         fillName(app, "结束测试")
 
-        dismissKeyboard(app)
         tapSave(app, "保存并结束")
 
         // 回到衣柜
@@ -288,16 +282,10 @@ final class CaptureFlowUITests: XCTestCase {
         nameField.typeText(text)
     }
 
-    /// 把键盘收掉：保存栏固定在底部，键盘弹着的时候会盖住它。
-    private func dismissKeyboard(_ app: XCUIApplication) {
-        if app.buttons["收起键盘"].firstMatch.exists {
-            app.buttons["收起键盘"].firstMatch.tap()
-            return
-        }
-        // 没有键盘工具栏按钮（比如名称框没聚焦）时，下滑表单也能收键盘
-        app.swipeDown()
-    }
-
+    /// 点保存。
+    ///
+    /// 保存栏用 `safeAreaInset` 固定在底部，**在键盘上方**，所以不需要先收键盘 ——
+    /// 这里刻意不 dismissKeyboard，直接点，验证的就是「键盘弹着也能保存」。
     private func tapSave(_ app: XCUIApplication, _ label: String) {
         let button = app.buttons[label].firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 5), "找不到保存按钮：\(label)")

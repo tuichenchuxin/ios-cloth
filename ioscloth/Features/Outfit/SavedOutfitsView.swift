@@ -71,12 +71,12 @@ private struct OutfitRow: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
                     ForEach(outfit.orderedItems) { item in
-                        PhotoThumbnailView(
+                        TappablePhoto(
+                            mainName: item.clothing?.imageFile ?? "",
                             thumbName: item.clothing?.thumbFile ?? "",
-                            mainName: item.clothing?.imageFile ?? ""
+                            title: item.clothing?.displayName ?? item.slot.displayName,
+                            size: 46
                         )
-                        .frame(width: 46, height: 46)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                 }
             }

@@ -341,8 +341,6 @@ enum OutfitEngine {
         }
         parts.append("适配 \(Int(item.tempMin.rounded()))–\(Int(item.tempMax.rounded()))°C")
 
-        if item.isLayerable { parts.append("可叠穿") }
-
         if let lastWorn = item.lastWorn {
             let days = Calendar.current.dateComponents([.day], from: lastWorn, to: now).day ?? 0
             parts.append(days <= 0 ? "今天穿过" : "近 \(days) 天未穿")

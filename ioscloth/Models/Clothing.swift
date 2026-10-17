@@ -23,7 +23,11 @@ final class Clothing {
     var tempMin: Double = 10
     /// 适合穿的最高气温（℃）
     var tempMax: Double = 26
-    /// 可叠穿：打底、开衫、薄外套这类能和别的衣服一起穿的
+    /// 预留：标记「打底 / 开衫 / 薄外套」这类能和别的衣服一起穿的。
+    ///
+    /// 目前**不参与任何计算**。一套搭配现在每个部位只能放一件，
+    /// 所以这个标记暂时没有意义，界面上也已经去掉了开关。
+    /// 等做「打底 + 毛衣 + 外套」的多层搭配时再启用（见 OutfitEngine 的 TODO）。
     var isLayerable: Bool = false
 
     // MARK: 外观

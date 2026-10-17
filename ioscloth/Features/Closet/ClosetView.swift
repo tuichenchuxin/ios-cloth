@@ -11,6 +11,7 @@ struct ClosetView: View {
     @State private var isCapturing = false
     @State private var isAddingBlank = false
     @State private var editingItem: Clothing?
+    @State private var viewerItem: PhotoViewerItem?
     /// 单独新增/编辑时不需要继承上一件，给个空草稿即可
     @State private var blankSeed = ClothingEditView.Draft()
 
@@ -38,6 +39,9 @@ struct ClosetView: View {
                 // 相册会跳过裁切页、也没有「保存并继续」。
                 // 新增录入方式时请一律加进 CaptureFlowView 的入口页，不要再在这里并行开一条。
                 CaptureFlowView { isCapturing = false }
+            }
+            .fullScreenCover(item: $viewerItem) { item in
+                PhotoViewerView(item: item)
             }
             .sheet(isPresented: $isAddingBlank) {
                 ClothingEditView(
@@ -101,12 +105,18 @@ struct ClosetView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 12) {
                 ForEach(visibleItems) { item in
-                    Button {
-                        editingItem = item
-                    } label: {
-                        ClothingGridCard(item: item)
-                    }
-                    .buttonStyle(.plain)
+                    // 点 → 全屏看大图；长按 → 编辑（用户要的交互）
+                    ClothingGridCard(item: item)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            viewerItem = PhotoViewerItem(clothing: item)
+                        }
+                        .onLongPressGesture(minimumDuration: 0.4) {
+                            editingItem = item
+                        }
+                        .accessibilityAction(named: "编辑") {
+                            editingItem = item
+                        }
                 }
             }
             .padding(.horizontal)
@@ -167,7 +177,7 @@ struct ClosetView: View {
                     }
                 }
 
-                Text("\(visibleItems.count) 件")
+                Text("\(visibleItems.count) 件 · 点图看大图，长按编辑")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.leading, 4)
