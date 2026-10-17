@@ -34,7 +34,7 @@ struct TemplateCameraView: View {
                             // 起点用「实际值」而不是显示值：显示值是节流过的，滞后会跳
                             let base = zoomBase ?? camera.currentZoom
                             if zoomBase == nil { zoomBase = base }
-                            camera.setZoom(base * value.magnification)
+                            camera.setDisplayZoom(base * value.magnification)
                         }
                         .onEnded { _ in zoomBase = nil }
                 )
@@ -64,7 +64,7 @@ struct TemplateCameraView: View {
 
                     // 变焦倍数提示（只在放大时出现）
                     if abs(camera.displayedZoom - 1) > 0.05 {
-                        Text(String(format: "%.1f×", camera.displayedZoom))
+                        Text(Self.zoomLabel(camera.displayedZoom))
                             .font(.caption.monospacedDigit().weight(.medium))
                             .foregroundStyle(.yellow)
                             .padding(.horizontal, 10)
@@ -159,6 +159,15 @@ struct TemplateCameraView: View {
         .disabled(!camera.isReady || isCapturing)
         .accessibilityLabel("拍照")
         .accessibilityIdentifier("shutter")
+    }
+
+    /// 倍数文案：整数不显示小数（1×、2×），半档保留一位（0.5×）
+    static func zoomLabel(_ value: CGFloat) -> String {
+        let rounded = value.rounded()
+        if abs(value - rounded) < 0.05 {
+            return "\(Int(rounded))×"
+        }
+        return String(format: "%.1f×", value)
     }
 
     private func updatePreviewSize(_ size: CGSize) {

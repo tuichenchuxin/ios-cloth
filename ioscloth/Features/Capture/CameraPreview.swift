@@ -16,22 +16,25 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var isDenied = false
     /// 权限都不弹（系统设置里关掉了）
     @Published private(set) var isRestricted = false
-    /// 界面显示的变焦倍数。
+    /// 「1×」对应的原始变焦值。虚拟多摄在第一个切换点之前是最广的那颗镜头，
+    /// 所以 1.0 是超广角、切换点（通常是 2.0）才是主摄。
+    private(set) var wideFactor: CGFloat = 1
+    /// 显示口径的上下限（相对主摄，例如 0.5…5）
+    private(set) var minDisplayZoom: CGFloat = 1
+    private(set) var maxDisplayZoom: CGFloat = 5
+
+    /// 界面显示的变焦倍数（**相对主摄**，和系统相机同一个说法：0.5× / 1× / 3×）。
     ///
     /// **故意和实际值分开**：如果每个手势事件都发布一次，SwiftUI 会整页重绘
     /// （预览层 + 蒙层 + 按钮），放大时会明显卡顿甚至跳一下。
     /// 这里只在变化超过 0.1 时才发布。
     @Published private(set) var displayedZoom: CGFloat = 1
 
-    /// 实际变焦倍数（同步更新，不触发重绘）。手势起点要用它，避免开头跳一下。
+    /// 实际显示倍数（同步更新，不触发重绘）。手势起点要用它，避免开头跳一下。
     private(set) var currentZoom: CGFloat = 1
 
-    /// 这台设备支持的变焦范围。有超广角时下限是 0.5。
-    private(set) var minZoom: CGFloat = 1
-    private(set) var maxZoom: CGFloat = 6
-
-    /// 手机上超过 6 倍画质就糊了，再高没意义
-    private static let zoomCap: CGFloat = 6
+    /// 手机上超过 5 倍（相对主摄）画质就糊了，再高没意义
+    private static let maxDisplayZoomCap: CGFloat = 5
 
     private let photoOutput = AVCapturePhotoOutput()
     private var device: AVCaptureDevice?
@@ -152,6 +155,15 @@ final class CameraController: NSObject, ObservableObject {
         let deviceMax = device.maxAvailableVideoZoomFactor
 
         // 诊断：把关键信息落到 Documents，方便用 devicectl 取出来排查
+        // 组件的镜头类型 + 切换点：用来判断 videoZoomFactor 1.0 到底对应哪颗镜头
+        let constituents = device.constituentDevices
+            .map { $0.deviceType.shortName }
+            .joined(separator: " → ")
+        let switchOversText = device.virtualDeviceSwitchOverVideoZoomFactors
+            .map { String(format: "%.2f", $0.doubleValue) }
+            .joined(separator: ", ")
+        let primary = device.activePrimaryConstituent?.deviceType.shortName ?? "(none)"
+
         CameraDiagnostics.record(
             deviceType: device.deviceType,
             minZoom: deviceMin,
@@ -161,22 +173,29 @@ final class CameraController: NSObject, ObservableObject {
                 deviceTypes: [.builtInTripleCamera, .builtInDualWideCamera, .builtInWideAngleCamera],
                 mediaType: .video,
                 position: .back
-            ).devices
+            ).devices,
+            constituents: constituents,
+            switchOverFactors: switchOversText.isEmpty ? "(none)" : switchOversText,
+            primaryConstituent: primary
         )
 
-        let minZ = matrixMin(deviceMin)
-        let maxZ = min(deviceMax, Self.zoomCap)
+        // 第一个切换点就是「主摄的完整视野」，也就是系统相机里的 1×。
+        // 实测 iPhone 17 Pro Max：constituents = ultraWide → wide → tele，
+        // switchOverFactors = 2.00, 8.00 → 1.0 是超广角、2.0 是主摄。
+        let switchOvers = device.virtualDeviceSwitchOverVideoZoomFactors.map(\.doubleValue)
+        let wide = switchOvers.first ?? deviceMin
+        let wideFactor = max(wide, deviceMin, 0.0001)
+        let minDisplay = wideFactor > 0 ? deviceMin / wideFactor : 1
+        let maxDisplay = min(deviceMax / wideFactor, Self.maxDisplayZoomCap)
+
         DispatchQueue.main.async {
-            self.minZoom = minZ
-            self.maxZoom = max(maxZ, minZ)
+            self.wideFactor = wideFactor
+            self.minDisplayZoom = max(minDisplay, 0.1)
+            self.maxDisplayZoom = max(maxDisplay, self.minDisplayZoom)
+            // 默认停在 1×（主摄），而不是最广的超广角 —— 拍衣服主摄更自然、畸变小
             self.currentZoom = 1
             self.displayedZoom = 1
         }
-    }
-
-    /// 下限至少取 0.5（个别设备会报 0），上限必须大于下限
-    private func matrixMin(_ deviceMin: CGFloat) -> CGFloat {
-        deviceMin.isFinite && deviceMin > 0 ? max(deviceMin, 0.5) : 0.5
     }
 
     // MARK: 变焦
@@ -185,16 +204,17 @@ final class CameraController: NSObject, ObservableObject {
     ///
     /// 直接设 `videoZoomFactor` 而不是 `ramp`：捏合是连续手势，
     /// ramp 会让画面追着手指慢慢滑，反而更不跟手。
-    func setZoom(_ factor: CGFloat) {
+    func setDisplayZoom(_ zoom: CGFloat) {
         guard let device else { return }
-        let clamped = Self.clampedZoom(factor, min: minZoom, max: maxZoom)
+        let clamped = Self.clampedZoom(zoom, min: minDisplayZoom, max: maxDisplayZoom)
+        let factor = Self.factor(forDisplayZoom: clamped, wideFactor: wideFactor)
 
         // 同步更新实际值，手势下次取起点时是准的（避免开头跳一下）
         currentZoom = clamped
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.pendingZoom = clamped
+            self.pendingZoom = factor
 
             // 已经在处理就交给循环带走最新值，不重复加锁
             guard !self.isApplyingZoom else { return }
@@ -221,17 +241,26 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    /// 回到 1×（主摄）
     func resetZoom() {
-        setZoom(1)
+        setDisplayZoom(1)
     }
 
-    /// 把捏合算出的目标倍数夹到设备范围内。
-    ///
-    /// 下限**不是 1**：有超广角时可以是 0.5（之前写死 `max(1, …)`，
-    /// 结果就是「只能放大不能缩小」）。
+    /// 把捏合算出的目标倍数夹到范围内
     static func clampedZoom(_ factor: CGFloat, min: CGFloat, max: CGFloat) -> CGFloat {
         guard factor.isFinite else { return 1 }
         return Swift.min(Swift.max(factor, min), max)
+    }
+
+    /// 原始变焦值 → 显示倍数（相对主摄）
+    static func displayZoom(forFactor factor: CGFloat, wideFactor: CGFloat) -> CGFloat {
+        guard wideFactor > 0 else { return factor }
+        return factor / wideFactor
+    }
+
+    /// 显示倍数（相对主摄）→ 原始变焦值
+    static func factor(forDisplayZoom zoom: CGFloat, wideFactor: CGFloat) -> CGFloat {
+        zoom * max(wideFactor, 0.0001)
     }
 
     // MARK: 拍照

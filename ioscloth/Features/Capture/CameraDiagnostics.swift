@@ -16,7 +16,10 @@ enum CameraDiagnostics {
         minZoom: CGFloat,
         maxZoom: CGFloat,
         format: AVCaptureDevice.Format,
-        availableDevices: [AVCaptureDevice]
+        availableDevices: [AVCaptureDevice],
+        constituents: String,
+        switchOverFactors: String,
+        primaryConstituent: String
     ) {
         #if DEBUG
         let formatter = DateFormatter()
@@ -28,6 +31,9 @@ enum CameraDiagnostics {
             "minZoom: \(minZoom)",
             "maxZoom: \(maxZoom)",
             "format: \(format.formatDescription.dimensions.width)x\(format.formatDescription.dimensions.height)",
+            "constituents: \(constituents)",
+            "switchOverFactors: \(switchOverFactors)",
+            "primaryConstituent: \(primaryConstituent)",
             "available back devices:",
         ]
         for device in availableDevices {
