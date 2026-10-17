@@ -99,6 +99,41 @@ final class GarmentTemplateTests: XCTestCase {
         XCTAssertNotEqual(topBounds, bottomBounds)
     }
 
+    // MARK: - 预览比例
+
+    /// 预览区做成 3:4（和照片同比例）后，换算就是等比缩放 ——
+    /// 这是「所见即所得」的前提。之前预览铺满屏幕（aspectFill），
+    /// 画面左右被裁掉约 39%，用户会误以为变焦没到超广角。
+    func testMappingIsIdentityWhenPreviewAspectMatchesPhoto() {
+        let photo = CGSize(width: 3024, height: 4032)     // 相机竖拍 3:4
+        let preview = CGSize(width: 440, height: 587)     // 预览区 3:4
+        let frame = GarmentTemplate.frameRect(in: preview)
+
+        let rect = GarmentTemplate.normalizedCropRect(
+            photoSize: photo, previewSize: preview, frameRect: frame
+        )
+
+        XCTAssertEqual(rect.minX, frame.minX / preview.width, accuracy: 0.002)
+        XCTAssertEqual(rect.minY, frame.minY / preview.height, accuracy: 0.002)
+        XCTAssertEqual(rect.width, frame.width / preview.width, accuracy: 0.002)
+        XCTAssertEqual(rect.height, frame.height / preview.height, accuracy: 0.002)
+    }
+
+    /// 预览铺满屏幕（aspectFill）时画面会被横向裁掉 —— 把当时的后果钉住，
+    /// 防止有人又把预览改回铺满屏幕。
+    func testScreenFilledPreviewCropsTheSides() {
+        let photo = CGSize(width: 3024, height: 4032)
+        let screen = CGSize(width: 440, height: 956)      // 19.5:9
+        let frame = GarmentTemplate.frameRect(in: screen)
+
+        let rect = GarmentTemplate.normalizedCropRect(
+            photoSize: photo, previewSize: screen, frameRect: frame
+        )
+
+        // 框的宽度换算成照片比例后，明显小于整幅宽度 —— 说明左右被裁了
+        XCTAssertLessThan(rect.width, 0.8, "铺满屏幕时可见宽度只剩约 61%")
+    }
+
     // MARK: - 裁切
 
     func testCropTakesTheFramedPortion() {
