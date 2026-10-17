@@ -78,6 +78,8 @@ final class CameraController: NSObject, ObservableObject {
             if !session.isRunning {
                 session.startRunning()
             }
+            // 变焦范围必须等会话跑起来再读：配置过程中读到的可能是默认值 1.0
+            refreshZoomRange()
             DispatchQueue.main.async { self.isReady = true }
         }
     }
@@ -86,7 +88,13 @@ final class CameraController: NSObject, ObservableObject {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
 
-        session.sessionPreset = .photo
+        // 关键：不能用 .photo 预设。
+        // `.photo` 会让会话挑一个静态照片格式，那个格式常常只对应广角镜头，
+        // 于是 videoZoomFactor 下限变成 1.0 —— 这就是「缩不到 0.5」的原因之一。
+        // `.inputPriority` 允许我们显式指定格式，虚拟多摄才能把超广角纳入变焦范围。
+        if session.canSetSessionPreset(.inputPriority) {
+            session.sessionPreset = .inputPriority
+        }
 
         // 优先用「虚拟多摄」设备：它在 0.5× 时会自动切到超广角。
         // 单颗广角镜头（builtInWideAngleCamera）最小就是 1×，无法缩小。
@@ -112,11 +120,17 @@ final class CameraController: NSObject, ObservableObject {
         session.addInput(input)
         self.device = device
 
-        // 记录真实可用范围：有超广角时 minZoom 会是 0.5
-        minZoom = max(device.minAvailableVideoZoomFactor, 0.5)
-        maxZoom = min(device.maxAvailableVideoZoomFactor, Self.zoomCap)
-        currentZoom = 1
-        DispatchQueue.main.async { self.displayedZoom = 1 }
+        // 显式选「最高画质」的格式。虚拟多摄在不同格式下支持的变焦范围不同，
+        // 这一步是让 0.5× 真正可用的前提。
+        if let format = device.formats.first(where: \.isHighestPhotoQualitySupported) {
+            do {
+                try device.lockForConfiguration()
+                device.activeFormat = format
+                device.unlockForConfiguration()
+            } catch {
+                // 设不上就用默认格式，不影响基本拍照
+            }
+        }
 
         guard session.canAddOutput(photoOutput) else { return false }
         session.addOutput(photoOutput)
@@ -129,6 +143,40 @@ final class CameraController: NSObject, ObservableObject {
 
         isConfigured = true
         return true
+    }
+
+    /// 会话运行后读取真实变焦范围。有超广角的机型下限是 0.5。
+    private func refreshZoomRange() {
+        guard let device else { return }
+        let deviceMin = device.minAvailableVideoZoomFactor
+        let deviceMax = device.maxAvailableVideoZoomFactor
+
+        // 诊断：把关键信息落到 Documents，方便用 devicectl 取出来排查
+        CameraDiagnostics.record(
+            deviceType: device.deviceType,
+            minZoom: deviceMin,
+            maxZoom: deviceMax,
+            format: device.activeFormat,
+            availableDevices: AVCaptureDevice.DiscoverySession(
+                deviceTypes: [.builtInTripleCamera, .builtInDualWideCamera, .builtInWideAngleCamera],
+                mediaType: .video,
+                position: .back
+            ).devices
+        )
+
+        let minZ = matrixMin(deviceMin)
+        let maxZ = min(deviceMax, Self.zoomCap)
+        DispatchQueue.main.async {
+            self.minZoom = minZ
+            self.maxZoom = max(maxZ, minZ)
+            self.currentZoom = 1
+            self.displayedZoom = 1
+        }
+    }
+
+    /// 下限至少取 0.5（个别设备会报 0），上限必须大于下限
+    private func matrixMin(_ deviceMin: CGFloat) -> CGFloat {
+        deviceMin.isFinite && deviceMin > 0 ? max(deviceMin, 0.5) : 0.5
     }
 
     // MARK: 变焦
