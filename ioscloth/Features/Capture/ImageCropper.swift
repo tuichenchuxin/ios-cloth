@@ -1,27 +1,28 @@
 import SwiftUI
 import UIKit
 
-/// 裁切照片：中间一个正方形取景框，图片在下面缩放平移。
+/// 裁切照片：中间一个正方形取景框，图片在下面缩放平移，框外压暗。
 ///
 /// 交互目标是最短路径：打开就已经居中放好、放大到刚好填满取景框，
-/// 用户直接点「完成」就行。想微调就双指缩放、拖动。
+/// 用户直接点「完成」就行。想微调就双指缩放、拖动；想改框大小就拖四角。
 ///
 /// ## 三个关键设计（都踩过坑，改之前先读）
 ///
 /// **1. 屏幕上永远只用缩略图。**
-///    相机原图动辄 4000×3000。直接交给界面按取景框大小绘制，每个手势帧都要
-///    重采样一张 1200 万像素的图，表现就是「进裁切页慢、拖动卡」。
+///    相机原图动辄 4000×3000。直接交给界面绘制，每个手势帧都要重采样一张
+///    1200 万像素的图，表现就是「进裁切页慢、拖动卡」。
 ///    所以先生成一张长边 1200px 的预览图（在主线程外），界面只画它；
 ///    点「完成」时再把裁切矩形按比例映射回原图，切出全分辨率结果。
 ///
-/// **2. 缩放平移交给 UIKit 的 `UIScrollView`，不自己写手势。**
+/// **2. 屏幕上只有一张图。**
+///    曾经试过「框内滚动视图 + 框外再画一张同变换的图」，结果两张必然错位：
+///    `UIScrollView` 内部的实时缩放，SwiftUI 的重绘永远追不上。
+///    现在靠 `CropScrollView` 的 `clipsToBounds = false`，让**同一张图**溢出到框外，
+///    再由 `CropOverlay` 压暗。见 `ZoomableCropView` 顶部注释。
+///
+/// **3. 缩放平移交给 UIKit 的 `UIScrollView`，不自己写手势。**
 ///    `MagnifyGesture` 的 `startAnchor` 报的是被缩放后的图片坐标系，
 ///    拿它当容器坐标做锚定，补偿量全错 —— 表现是「无论捏哪里取景框都往同一方向漂」。
-///
-/// **3. 滚动视图必须铺满整块可用区域，取景框只是画在它上面的一层。**
-///    如果滚动视图缩在取景框那么大的一块里，「滚动夹住的边界」和
-///    「取景框的边界」就不是同一条线，贴着原图边缘的内容永远拖不进框里。
-///    两者同区之后，拖到头的时刻正好是该方向的内容贴住取景框边。
 struct ImageCropper: View {
     let image: UIImage
     /// 回调裁切结果
@@ -31,19 +32,23 @@ struct ImageCropper: View {
 
     /// 预览图长边像素。1200 是为了在 3× 屏上画取景框仍清晰，同时小到足以让手势流畅。
     static let previewMaxDimension: CGFloat = 1200
-    /// 取景框占可用短边的比例
-    static let cropSideRatio: CGFloat = 0.88
-    /// 取景框边长下限。太小的话放大后能看到的范围太窄，很难对准细节。
-    static let minCropSide: CGFloat = 240
-    /// 取景框边长上限（iPad 上不至于占满整屏）
+    /// 取景框占可用短边的初始比例
+    static let cropSideRatio: CGFloat = 0.72
+    /// 取景框边长下限
+    static let minCropSide: CGFloat = 180
+    /// 取景框边长上限（大屏上不至于占满整屏）
     static let maxCropSide: CGFloat = 520
+    /// 四角拖拽手柄的直径
+    static let handleDiameter: CGFloat = 34
 
     /// 原图（方向已拍平）。裁切结果取自它，所以不损失分辨率。
     @State private var original: UIImage?
     /// 屏幕上实际绘制的缩略图
     @State private var preview: UIImage?
-    /// 取景框边长（由可用空间算出）
-    @State private var cropSide: CGFloat = 300
+    /// 取景框边长（可拖动四角调整）
+    @State private var cropSide: CGFloat = 0
+    /// 拖拽手柄按下时的边长，用来算增量
+    @State private var dragStartSide: CGFloat?
     /// 当前缩放平移（由 UIKit 上报的原始量）
     @State private var transform = CropTransform.identity
     /// 「刚好填满取景框」的基准缩放（由 UIKit 上报）
@@ -101,66 +106,53 @@ struct ImageCropper: View {
 
     private func editor(preview: UIImage) -> some View {
         VStack(spacing: 16) {
-            // 取景框 = 滚动视图 = 同一块区域，逐层收窄：
-            //
-            //   ZStack                      铺满可用区域，负责画框外压暗
-            //     Color.black
-            //     CropOverlay(cropSide: side)  只在框外压暗（框内透明，透出下面的图片）
-            //     ZoomableCropView             **尺寸 == 取景框**，居中
-            //
-            // 最后一层必须是和取景框等大的滚动视图：`UIScrollView` 的夹取边界
-            // 就是它的 bounds，只有两者重合，图片的上/下/左/右边缘才能精确拖到框边。
-            // 之前让滚动视图铺满整屏、取景框只占 88%，于是图片在夹取方向上还能多走
-            // 「(视口 − 取景框) / 2」的距离，贴边内容就永远进不了框。
             GeometryReader { geometry in
-                let side = Self.cropSide(fitting: geometry.size)
-                let windowOrigin = CGPoint(
+                let side = cropSide > 0
+                    ? cropSide
+                    : Self.clampedCropSide(Self.cropSide(fitting: geometry.size), available: geometry.size)
+                let window = CGRect(
                     x: (geometry.size.width - side) / 2,
-                    y: (geometry.size.height - side) / 2
+                    y: (geometry.size.height - side) / 2,
+                    width: side,
+                    height: side
                 )
 
-                ZStack(alignment: .topLeading) {
+                ZStack {
                     Color.black
 
-                    // 框外也显示同一张图（只是被压暗），这样能看到照片的其余部分，
-                    // 方便判断主体在整张照片里的位置。
-                    //
-                    // 关键在于它必须和框内的图片**共用同一个变换**，
-                    // 否则框内外会对不上、看起来像两张不同的图。
-                    Image(uiImage: preview)
-                        // 必须 resizable：否则 Image 按原始点尺寸绘制（675×1200pt），
-                        // frame 只约束布局不缩放内容，框内外就对不上了。
-                        .resizable()
-                        .interpolation(.medium)
-                        .frame(
-                            width: preview.size.width * transform.zoomScale,
-                            height: preview.size.height * transform.zoomScale
-                        )
-                        .offset(
-                            x: windowOrigin.x - transform.contentOffset.x,
-                            y: windowOrigin.y - transform.contentOffset.y
-                        )
-
-                    // 框内：可缩放平移的图片，尺寸严格等于取景框（见 ZoomableCropView 注释）
+                    // 图片页：frame 就是取景框，但内容溢出（clipsToBounds = false），
+                    // 所以框内外是同一张图，缩放时不会错位。
                     ZoomableCropView(
                         image: preview,
                         onTransformChange: { transform = $0 },
                         onFit: { fitScale = $0 }
                     )
                     .frame(width: side, height: side)
-                    .position(x: windowOrigin.x + side / 2, y: windowOrigin.y + side / 2)
+                    .position(x: window.midX, y: window.midY)
 
                     // 框外压暗 + 白边 + 三分线（框内透明，透出下面的图片）
                     CropOverlay(cropSide: side)
                         .allowsHitTesting(false)
+
+                    // 四角拖动改框大小
+                    resizeHandles(window: window, available: geometry.size)
                 }
                 .clipped()
-                .onAppear { cropSide = side }
-                .onChange(of: side) { _, newValue in cropSide = newValue }
+                .onAppear {
+                    if cropSide == 0 {
+                        cropSide = Self.clampedCropSide(
+                            Self.cropSide(fitting: geometry.size),
+                            available: geometry.size
+                        )
+                    }
+                }
+                .onChange(of: geometry.size) { _, newValue in
+                    cropSide = Self.clampedCropSide(cropSide, available: newValue)
+                }
             }
 
             VStack(spacing: 2) {
-                Text("双指缩放，单指拖动。直接点「完成」也行。")
+                Text("双指缩放，单指拖动；拖四角可改框大小。直接点「完成」也行。")
                     .font(.footnote)
                 // 让用户（和自己排查问题时）知道最终会存下多大的一块。
                 // 它同时是最好的调试手段：派生量不变就说明某个输入没接进公式。
@@ -170,6 +162,42 @@ struct ImageCropper: View {
             }
             .foregroundStyle(.secondary)
         }
+    }
+
+    // MARK: - 四角手柄
+
+    private func resizeHandles(window: CGRect, available: CGSize) -> some View {
+        ZStack {
+            ForEach(Array(Self.Corner.allCases.enumerated()), id: \.offset) { _, corner in
+                Circle()
+                    .fill(Color.white.opacity(0.9))
+                    .frame(width: Self.handleDiameter, height: Self.handleDiameter)
+                    .overlay {
+                        Circle().strokeBorder(Color.black.opacity(0.25), lineWidth: 1)
+                    }
+                    .position(
+                        x: window.midX + corner.dx * window.width / 2,
+                        y: window.midY + corner.dy * window.height / 2
+                    )
+                    .gesture(resizeGesture(corner: corner, available: available))
+                    .accessibilityLabel("调整取景框大小")
+            }
+        }
+    }
+
+    private func resizeGesture(corner: Self.Corner, available: CGSize) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                let start = dragStartSide ?? cropSide
+                if dragStartSide == nil { dragStartSide = start }
+
+                // 框始终居中：角往外拖 t，边长增加 t（两个方向各 t/2）
+                let delta = value.translation.width * corner.dx + value.translation.height * corner.dy
+                cropSide = Self.clampedCropSide(start + delta, available: available)
+            }
+            .onEnded { _ in
+                dragStartSide = nil
+            }
     }
 
     /// 最终裁切结果的像素尺寸提示，例如「将保存 1024 × 1024 像素」
@@ -199,27 +227,54 @@ struct CropTransform: Equatable {
     static let identity = CropTransform()
 }
 
-// MARK: - 裁切换算（纯函数，便于单测）
+// MARK: - 取景框尺寸与裁切换算（纯函数，便于单测）
 
 extension ImageCropper {
-    /// 取景框边长：占可用短边的固定比例，并夹在上下限之间。
-    ///
-    /// 之前写死 340pt，在 iPhone 上显得又小又挤，贴近原图边缘的内容很难塞进去。
+    /// 拖拽手柄的四个角。`dx` / `dy` 是它相对中心的方向。
+    enum Corner: CaseIterable {
+        case topLeading, topTrailing, bottomLeading, bottomTrailing
+
+        var dx: CGFloat {
+            switch self {
+            case .topLeading, .bottomLeading: -1
+            case .topTrailing, .bottomTrailing: 1
+            }
+        }
+
+        var dy: CGFloat {
+            switch self {
+            case .topLeading, .topTrailing: -1
+            case .bottomLeading, .bottomTrailing: 1
+            }
+        }
+    }
+
+    /// 取景框的初始边长：占可用短边的固定比例
     static func cropSide(fitting available: CGSize) -> CGFloat {
         let shortSide = min(available.width, available.height)
         guard shortSide > 0 else { return minCropSide }
-        let preferred = min(max(shortSide * cropSideRatio, minCropSide), maxCropSide)
-        // 下限也不能突破可用空间：极小屏上取景框比可视区还大会画到屏幕外
-        return min(preferred, shortSide)
+        return shortSide * cropSideRatio
     }
+
+    /// 把边长夹到可选范围内：不小于下限，且不超过「可用空间减去手柄直径」。
+    ///
+    /// 减去手柄直径是为了让四角手柄**始终完整可见** —— 否则框拖到最大时
+    /// 手柄会被屏幕边缘切掉一半，很难再拖回来。
+    /// 拖动四角、以及窗口尺寸变化都会走这里。
+    static func clampedCropSide(_ value: CGFloat, available: CGSize) -> CGFloat {
+        let usable = min(available.width, available.height) - handleInset * 2
+        let limit = min(usable, maxCropSide)
+        guard limit >= minCropSide else { return max(usable, 0) }
+        return min(max(value, minCropSide), limit)
+    }
+
+    /// 手柄留出的边距（手柄半径）
+    static let handleInset: CGFloat = handleDiameter / 2
 
     /// 取景框在**图片像素**里对应的边长。
     ///
     /// 取景框固定不动、图片被缩放，所以取景框覆盖的屏幕宽度
     /// 对应图片里的 `cropSide / zoomScale` 个点。
-    ///
-    /// `fitScale` 是「刚好填满取景框」的基准缩放：在它之下不该发生
-    /// （`minimumZoomScale` 保证），真发生了就夹住。
     static func cropSideInImage(cropSide: CGFloat, zoomScale: CGFloat, fitScale: CGFloat) -> CGFloat {
         guard cropSide > 0, fitScale > 0 else { return 0 }
         let effective = max(zoomScale, fitScale)
@@ -229,20 +284,11 @@ extension ImageCropper {
 
     /// 取景框在**图片像素**里对应的矩形。
     ///
-    /// ## 符号坑（我在这里错过两次，用真实滚动视图量出来的）
+    /// 三个量全部由 `UIScrollView` 直接给出，这里只做一次线性换算：屏幕中心 → 图片坐标。
     ///
-    /// `contentOffset` 是**内容原点在滚动视图坐标里的位置**，而内容原点通常是负数：
-    /// `contentOffset.y < 0` 意味着内容在屏幕上**往下**走了。
-    /// 所以「屏幕位置 → 图片坐标」是
-    ///
-    ///     图片坐标 = 屏幕位置 − 内容原点 = 屏幕位置 − (−contentOffset) = 屏幕位置 + contentOffset
-    ///
-    /// 也就是**加号**。写成减号会让取景框朝着用户拖动的反方向偏移两倍 ——
-    /// 表现就是「放大后怎么拖都到不了图片边缘」。
-    ///
-    /// 实测（viewport 387、图片 675×1200、zoom=0.5733 即刚好填满）：
-    /// - offset.y = 0   → rect.y = 0…675     居中，正确
-    /// - offset.y = −150（内容的极限）→ rect.y = 0…675  上边缘正好贴住框顶
+    /// 推导：内容坐标 `c` 在滚动视图上的位置是 `c - contentOffset`，
+    /// 所以可视区中心（`viewportSize / 2`）对应的图片坐标是
+    /// `(viewportSize / 2 + contentOffset) / zoomScale`。
     static func cropRectInImage(cropSide: CGFloat, transform: CropTransform, fitScale: CGFloat) -> CGRect {
         let side = cropSideInImage(
             cropSide: cropSide,
@@ -331,7 +377,7 @@ private struct CropOverlay: View {
     /// 框外压暗：整块半透明黑，再把中间的正方形抠掉
     private var dimming: some View {
         Rectangle()
-            .fill(Color.black.opacity(0.55))
+            .fill(Color.black.opacity(0.6))
             .reverseMask {
                 Rectangle().frame(width: cropSide, height: cropSide)
             }

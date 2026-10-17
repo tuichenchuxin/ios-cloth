@@ -6,27 +6,17 @@ import UIKit
 /// 裁切坐标换算、批量录入的字段继承。
 final class CaptureFlowTests: XCTestCase {
 
-    // MARK: - 取景框尺寸
+    // MARK: - 取景框尺寸（初始值 + 拖四角调节）
 
-    /// 取景框按屏幕短边取比例，而不是写死 —— 之前固定 340pt，在 iPhone 上太小太挤
-    func testCropSideScalesWithScreen() {
-        let iPhone = ImageCropper.cropSide(fitting: CGSize(width: 440, height: 700))
-        let iPad = ImageCropper.cropSide(fitting: CGSize(width: 1000, height: 1300))
-
-        XCTAssertGreaterThan(iPad, iPhone, "大屏取景框应该更大")
-        XCTAssertEqual(iPhone, 440 * ImageCropper.cropSideRatio, accuracy: 0.5)
+    func testInitialCropSideUsesRatio() {
+        let side = ImageCropper.cropSide(fitting: CGSize(width: 440, height: 700))
+        XCTAssertEqual(side, 440 * ImageCropper.cropSideRatio, accuracy: 0.5)
     }
 
-    func testCropSideHonoursBounds() {
-        // 空间比下限还小时，以「装得下」优先 —— 取景框绝不能画到屏幕外
-        XCTAssertEqual(ImageCropper.cropSide(fitting: CGSize(width: 100, height: 100)), 100)
-        // 空间够用时才有下限
-        XCTAssertEqual(
-            ImageCropper.cropSide(fitting: CGSize(width: 260, height: 500)),
-            ImageCropper.minCropSide
-        )
-        // 极大屏不超过上限
-        XCTAssertEqual(ImageCropper.cropSide(fitting: CGSize(width: 2000, height: 2000)), ImageCropper.maxCropSide)
+    func testInitialCropSideIsProportionalNotFixed() {
+        let phone = ImageCropper.cropSide(fitting: CGSize(width: 440, height: 700))
+        let bigger = ImageCropper.cropSide(fitting: CGSize(width: 700, height: 900))
+        XCTAssertGreaterThan(bigger, phone, "大屏初始框应该更大，而不是写死一个值")
         // 不依赖哪一边更短
         XCTAssertEqual(
             ImageCropper.cropSide(fitting: CGSize(width: 700, height: 440)),
@@ -35,25 +25,63 @@ final class CaptureFlowTests: XCTestCase {
         )
     }
 
-    func testCropSideNeverExceedsAvailableSpace() {
-        for side in stride(from: 200.0, through: 1400.0, by: 50.0) {
-            let fit = ImageCropper.cropSide(fitting: CGSize(width: side, height: side * 1.6))
-            XCTAssertLessThanOrEqual(fit, side, "取景框不能比可用区域还大")
-        }
-    }
-
-    func testCropSideHandlesZeroSize() {
+    func testInitialCropSideHandlesZeroSize() {
         XCTAssertEqual(ImageCropper.cropSide(fitting: .zero), ImageCropper.minCropSide)
     }
 
-    /// **取景框必须和滚动视图同区**：如果取景框比视口小，那么贴在原图边缘的
-    /// 内容被滚动夹住时就进不了框。这条测试守住「框 = 视口」这个前提。
-    func testFrameFillsViewportSoEdgesAreReachable() {
-        // 取景框边长 == 传给 UIKit 的 cropSide；滚动视图也铺满同一块区域，
-        // 所以两者的边界重合。这里用「取景框不算太小」间接守住可用性。
-        let viewport = CGSize(width: 440, height: 700)
-        let side = ImageCropper.cropSide(fitting: viewport)
-        XCTAssertGreaterThan(side, viewport.width * 0.8, "取景框应该占据大部分宽度，否则边缘很难对准")
+    /// 拖四角时边长必须夹在 [下限, 可用空间 − 手柄] 之间
+    func testClampedCropSideHonoursBounds() {
+        let available = CGSize(width: 440, height: 800)
+
+        // 拖得很大 → 不超过可用宽度减去手柄
+        let huge = ImageCropper.clampedCropSide(2000, available: available)
+        XCTAssertLessThanOrEqual(huge, available.width - ImageCropper.handleInset * 2 + 0.01)
+        XCTAssertLessThanOrEqual(huge, ImageCropper.maxCropSide)
+
+        // 拖得很小 → 不小于下限
+        XCTAssertEqual(
+            ImageCropper.clampedCropSide(10, available: available),
+            ImageCropper.minCropSide
+        )
+
+        // 中间值原样返回
+        XCTAssertEqual(ImageCropper.clampedCropSide(300, available: available), 300, accuracy: 0.01)
+    }
+
+    /// 手柄必须始终完整可见：框的最大边长要留出手柄直径
+    func testMaxCropSideKeepsHandlesVisible() {
+        for width in stride(from: 320.0, through: 1400.0, by: 40.0) {
+            let available = CGSize(width: width, height: width * 1.6)
+            let maxSide = ImageCropper.clampedCropSide(.greatestFiniteMagnitude, available: available)
+            XCTAssertLessThanOrEqual(
+                maxSide, width - ImageCropper.handleDiameter + 0.01,
+                "width=\(width) 时框太大会把手柄顶出屏幕"
+            )
+        }
+    }
+
+    /// 拖角的方向语义：往外拖变大、往里拖变小（四个角方向不同，取符号判断）
+    func testCornerDragDirectionEnlargesOutward() {
+        let available = CGSize(width: 440, height: 800)
+        let start: CGFloat = 300
+
+        for corner in ImageCropper.Corner.allCases {
+            // 往外拖 40（沿两个方向各 40）
+            let outward = CGSize(width: 40 * corner.dx, height: 40 * corner.dy)
+            let enlarged = ImageCropper.clampedCropSide(
+                start + outward.width * corner.dx + outward.height * corner.dy,
+                available: available
+            )
+            XCTAssertGreaterThan(enlarged, start, "\(corner) 往外拖应该变大")
+
+            // 往里拖 40
+            let inward = CGSize(width: -40 * corner.dx, height: -40 * corner.dy)
+            let shrunk = ImageCropper.clampedCropSide(
+                start + inward.width * corner.dx + inward.height * corner.dy,
+                available: available
+            )
+            XCTAssertLessThan(shrunk, start, "\(corner) 往里拖应该变小")
+        }
     }
 
     // MARK: - 取景框对应的图片边长

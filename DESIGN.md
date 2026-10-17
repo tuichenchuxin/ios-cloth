@@ -29,7 +29,7 @@
 | M5 穿着记录与反馈 | ⬜ | 表结构已就位，UI 未做 |
 | M6 真机 | ✅ | 已装到「陈出新的iPhone」（iOS 27.0.1）。免费证书，**7 天需重装**，见 `scripts/install-to-device.sh` |
 
-**测试总量：99 个**（92 单测 + 7 UI 端到端），全绿。
+**测试总量：100 个**（93 单测 + 7 UI 端到端），全绿。
 
 ### 已知的坑（都是真机上暴露出来的，改之前先读）
 
@@ -51,6 +51,7 @@
 | 14 | 换成 `UIScrollView` 后**完全没法缩放** | 缩放范围在 `makeUIView` 里算，那时视图还没进层级、`bounds` 是 zero，`minimumZoomScale` 被设成 0/NaN —— `UIScrollView` 会因此完全不响应捏合 | 缩放装配挪到 `layoutSubviews`（`bounds` 定稿后再配），构造函数里先给一个合法的非零范围兜着 |
 | 15 | **放大后拖到衣服上，裁出来还是图片正中央** | 裁切矩形被我写成了「原图中央的正方形」，忽略了平移 | 把 `UIScrollView` 的 `contentOffset` 和可视尺寸一起上报，裁切中心 = `(viewportSize/2 + contentOffset) / zoomScale`（纯函数 + 单测） |
 | 16 | 取景框又小又挤 | 写死 340pt | 改成按屏幕短边取 88%（夹在 240–520pt，且不超过可用空间） |
+| 16c | **框内外看起来像两张图**，缩放时明显错位 | 我用「框内滚动视图 + 框外再画一张同变换的 Image」来补背景。这是根本错误：`UIScrollView` 内部缩放是实时的，SwiftUI 的重绘永远追不上，两者必然错位 | **屏幕上只保留一张图**：滚动视图 frame = 取景框，但 `clipsToBounds = false` —— 同一张图溢出到框外，再由 `CropOverlay` 压暗。夹取边界仍是取景框，边缘可达性不受影响 |
 | 16b | **贴着原图最上面的内容怎么拖都进不了框**（反复反馈三次） | **滚动视图的尺寸和取景框不一致**。`UIScrollView` 把内容夹在「自身边界」内，所以视口比取景框大时，图片边缘最多只能走到 `(视口 − 取景框)/2` 的位置，永远差这一截。中间我还走过一次弯路：把滚动视图铺满整屏 + 取景框当覆盖层，看着像修好了，其实正是这个 bug | **滚动视图的 frame 严格等于取景框**（`ZStack` 里 `Color` + `CropOverlay` + 等大的 `ZoomableCropView`）。这是 iOS 所有成熟裁切器（RSKImageCropper / TOCropViewController）的共同做法 |
 | 17 | **「保存并结束」没有退出流程，而是回到入口页** | `enter(.idle)` 只切到入口页，外层那个 `fullScreenCover` 还在；而在同一帧里既关内层 sheet 又关外层 cover 会让 SwiftUI 丢状态 | 新增 `finishFlow()`：先切到 idle 让表单收干净，等 400ms 动画走完再 `onFinish()` |
 | 18 | 「保存并结束」和「保存并继续」行为完全一样（都回相机） | 外壳的 `onSave` 回调写成了恒定的 `onSaved(true)`，用户点的是哪个按钮根本没传出去 | `onSave` 改成接收 `SaveRequest`，如实转达用户的选择 |
