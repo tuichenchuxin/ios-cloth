@@ -149,7 +149,7 @@ final class CaptureFlowUITests: XCTestCase {
         // 表单里点「返回」→ 回到入口页，不写入任何数据
         app.buttons["返回"].firstMatch.tap()
         XCTAssertTrue(
-            app.buttons["拍照"].firstMatch.waitForExistence(timeout: 15),
+            app.buttons["entry-camera"].firstMatch.waitForExistence(timeout: 15),
             "放弃表单后应该回到录入入口页"
         )
 
@@ -173,7 +173,7 @@ final class CaptureFlowUITests: XCTestCase {
         captureEntry.tap()
 
         XCTAssertTrue(
-            app.buttons["从相册选"].firstMatch.waitForExistence(timeout: 20),
+            app.buttons["entry-library"].firstMatch.waitForExistence(timeout: 20),
             "应该进入录入入口页"
         )
     }
@@ -187,7 +187,7 @@ final class CaptureFlowUITests: XCTestCase {
     /// 它外面套了一层拦截触摸的容器（`isHittable == false`）；
     /// 直接点 `collectionViews.cells` 经常点不中，测试会卡在相册页。
     private func pickAndCropPhoto(_ app: XCUIApplication) {
-        app.buttons["从相册选"].firstMatch.tap()
+        app.buttons["entry-library"].firstMatch.tap()
 
         let photo = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
         if photo.waitForExistence(timeout: 30) {
@@ -231,6 +231,55 @@ final class CaptureFlowUITests: XCTestCase {
         XCTAssertTrue(button.waitForExistence(timeout: 5), "找不到保存按钮：\(label)")
         XCTAssertTrue(button.isHittable, "「\(label)」必须可点（不能被键盘挡住）")
         button.tap()
+    }
+}
+
+/// 拍照模板选择的入口测试。
+final class GarmentTemplateUITests: XCTestCase {
+
+    func testTemplateChipsSwitchCameraLabel() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-uitest-reset-data", "-uitest-seed-wardrobe"]
+        app.launch()
+
+        openCaptureEntry(app)
+
+        // 四个模板都在
+        for template in ["free", "top", "bottom", "dress"] {
+            XCTAssertTrue(
+                app.buttons["template-\(template)"].firstMatch.exists,
+                "入口页应该有模板选项：\(template)"
+            )
+        }
+
+        // 默认是上衣模板
+        XCTAssertTrue(app.buttons["拍照（上衣模板）"].firstMatch.exists)
+
+        // 切到下衣
+        app.buttons["template-bottom"].firstMatch.tap()
+        XCTAssertTrue(
+            app.buttons["拍照（下衣模板）"].firstMatch.waitForExistence(timeout: 5),
+            "切到下衣模板后，拍照按钮文案应该跟着变"
+        )
+
+        // 切到自由：文案变成「自由拍照」
+        app.buttons["template-free"].firstMatch.tap()
+        XCTAssertTrue(
+            app.buttons["自由拍照"].firstMatch.waitForExistence(timeout: 5),
+            "自由模板下应该是系统相机"
+        )
+    }
+
+    private func openCaptureEntry(_ app: XCUIApplication) {
+        app.tabBars.buttons["衣柜"].firstMatch.tap()
+        app.buttons["添加"].firstMatch.tap()
+        let entry = app.buttons["拍照 / 从相册录入"].firstMatch
+        XCTAssertTrue(entry.waitForExistence(timeout: 10))
+        entry.tap()
+        XCTAssertTrue(
+            app.buttons["entry-library"].firstMatch.waitForExistence(timeout: 20),
+            "应该进入录入入口页"
+        )
     }
 }
 

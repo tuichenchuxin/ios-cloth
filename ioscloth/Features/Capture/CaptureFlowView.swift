@@ -26,14 +26,17 @@ struct CaptureFlowView: View {
 
     private enum Scene: Equatable {
         case idle
+        /// 系统相机（自由拍照，带系统裁剪）
         case camera
+        /// 自建相机 + 衣物轮廓蒙层（拍完自动按框裁成正方形）
+        case templateCamera
         case photoLibrary
         case form
 
         /// 是否是一个「全屏/半屏模态」
         var isModal: Bool {
             switch self {
-            case .camera, .photoLibrary, .form: true
+            case .camera, .templateCamera, .photoLibrary, .form: true
             case .idle: false
             }
         }
@@ -54,6 +57,8 @@ struct CaptureFlowView: View {
     /// 这一轮的来源
     @State private var source: Source = .camera
     @State private var cameraUnavailableAlert = false
+    /// 当前选的拍照模板（模板拍照用蒙层，自由拍照走系统相机）
+    @State private var template: GarmentTemplate = .top
 
     var body: some View {
         Group {
@@ -62,6 +67,8 @@ struct CaptureFlowView: View {
                 entryScreen
             case .camera:
                 cameraPickerScreen
+            case .templateCamera:
+                templateCameraScreen
             case .photoLibrary:
                 libraryPickerScreen
             case .form:
@@ -133,7 +140,7 @@ struct CaptureFlowView: View {
                         .foregroundStyle(.tertiary)
                     Text(recordedCount > 0 ? "继续录下一件" : "开始录入衣物")
                         .font(.title3.weight(.medium))
-                    Text("拍完后可以用系统裁剪把衣服抠成正方形，圈身和温度会自动沿用上一件。")
+                    Text("选模板拍照会把衣服摆正、自动裁成方形；选「自由」则用系统相机+系统裁剪。季节和温度会沿用上一件。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -143,14 +150,18 @@ struct CaptureFlowView: View {
                 Spacer()
 
                 VStack(spacing: 12) {
+                    templatePicker
+
                     Button {
                         startCamera()
                     } label: {
-                        Label("拍照", systemImage: "camera.fill")
+                        Label(template == .free ? "自由拍照" : "拍照（\(template.displayName)模板）", systemImage: "camera.fill")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+                    // 文案会随模板变化，所以给稳定标识供测试/无障碍使用
+                    .accessibilityIdentifier("entry-camera")
 
                     Button {
                         startLibrary()
@@ -160,6 +171,7 @@ struct CaptureFlowView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.large)
+                    .accessibilityIdentifier("entry-library")
 
                     if !SystemImagePicker.isCameraAvailable {
                         Text("模拟器没有相机，请用「从相册选」。")
@@ -180,6 +192,27 @@ struct CaptureFlowView: View {
         }
     }
 
+    /// 拍照模板选择：模板拍照会叠衣物轮廓蒙层，自由拍照走系统相机
+    private var templatePicker: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                ForEach(GarmentTemplate.allCases) { item in
+                    Button {
+                        template = item
+                    } label: {
+                        FilterChip(title: item.displayName, isActive: template == item)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("template-\(item.rawValue)")
+                }
+            }
+            Text(template.hint)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+    }
+
     private func startCamera() {
         guard SystemImagePicker.isCameraAvailable else {
             cameraUnavailableAlert = true
@@ -187,7 +220,8 @@ struct CaptureFlowView: View {
         }
         source = .camera
         captured = nil
-        scene = .camera
+        // 模板拍照要自己画蒙层，系统相机加不了，所以走自建相机
+        scene = (template == .free) ? .camera : .templateCamera
     }
 
     private func startLibrary() {
@@ -205,6 +239,17 @@ struct CaptureFlowView: View {
             onCancel: { enter(.idle) }
         )
         .ignoresSafeArea()
+    }
+
+    private var templateCameraScreen: some View {
+        TemplateCameraView(
+            template: template,
+            onCapture: { image in
+                captured = image
+                enter(.form)
+            },
+            onCancel: { enter(.idle) }
+        )
     }
 
     private var libraryPickerScreen: some View {
