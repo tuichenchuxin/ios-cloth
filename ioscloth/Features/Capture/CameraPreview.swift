@@ -16,8 +16,14 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var isDenied = false
     /// 权限都不弹（系统设置里关掉了）
     @Published private(set) var isRestricted = false
+    /// 当前变焦倍数（1 = 原始视角）
+    @Published private(set) var zoomFactor: CGFloat = 1
+
+    /// 变焦上限。设备本身支持更高，但手机上超过 6 倍画质就糊了
+    static let maxZoom: CGFloat = 6
 
     private let photoOutput = AVCapturePhotoOutput()
+    private var device: AVCaptureDevice?
     private let sessionQueue = DispatchQueue(label: "ioscloth.camera.session")
     private var captureHandler: ((UIImage?) -> Void)?
     private var isConfigured = false
@@ -74,6 +80,7 @@ final class CameraController: NSObject, ObservableObject {
             return false
         }
         session.addInput(input)
+        self.device = device
 
         guard session.canAddOutput(photoOutput) else { return false }
         session.addOutput(photoOutput)
@@ -86,6 +93,33 @@ final class CameraController: NSObject, ObservableObject {
 
         isConfigured = true
         return true
+    }
+
+    // MARK: 变焦
+
+    /// 捏合变焦。1 倍是原始视角，上限取设备能力和 `maxZoom` 中较小的那个。
+    ///
+    /// 直接设 `videoZoomFactor`（而不是 ramp）是为了跟手 —— 捏合是连续的，
+    /// 让指头的位置即时对应缩放；ramp 会在收手后继续滑一段，反而怪。
+    func setZoom(_ factor: CGFloat) {
+        guard let device else { return }
+        let deviceLimit = min(device.activeFormat.videoMaxZoomFactor, Self.maxZoom)
+        let clamped = max(1, min(factor, deviceLimit))
+
+        sessionQueue.async { [weak self] in
+            do {
+                try device.lockForConfiguration()
+                device.videoZoomFactor = clamped
+                device.unlockForConfiguration()
+                DispatchQueue.main.async { self?.zoomFactor = clamped }
+            } catch {
+                // 设不上就保持原样，不要打断拍照
+            }
+        }
+    }
+
+    func resetZoom() {
+        setZoom(1)
     }
 
     // MARK: 拍照

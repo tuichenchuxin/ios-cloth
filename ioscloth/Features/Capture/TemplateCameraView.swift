@@ -17,6 +17,8 @@ struct TemplateCameraView: View {
     @State private var isCapturing = false
     /// 预览区域尺寸（用来把屏幕上的框换算成照片里的比例）
     @State private var previewSize: CGSize = .zero
+    /// 捏合开始时的倍数（避免累乘漂移）
+    @State private var zoomBase: CGFloat?
     @State private var showPermissionAlert = false
 
     var body: some View {
@@ -25,6 +27,16 @@ struct TemplateCameraView: View {
 
             CameraPreview(session: camera.session)
                 .ignoresSafeArea()
+                // 捏合变焦：和系统相机一样，双指放大缩小
+                .gesture(
+                    MagnifyGesture()
+                        .onChanged { value in
+                            let base = zoomBase ?? camera.zoomFactor
+                            if zoomBase == nil { zoomBase = base }
+                            camera.setZoom(base * value.magnification)
+                        }
+                        .onEnded { _ in zoomBase = nil }
+                )
 
             GeometryReader { geometry in
                 let frame = GarmentTemplate.frameRect(in: geometry.size)
@@ -48,6 +60,17 @@ struct TemplateCameraView: View {
                     RoundedRectangle(cornerRadius: 12)
                         .strokeBorder(Color.white.opacity(0.5), lineWidth: 1)
                         .frame(width: frame.width, height: frame.height)
+
+                    // 变焦倍数提示（只在放大时出现）
+                    if camera.zoomFactor > 1.05 {
+                        Text(String(format: "%.1f×", camera.zoomFactor))
+                            .font(.caption.monospacedDigit().weight(.medium))
+                            .foregroundStyle(.yellow)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(.black.opacity(0.5), in: Capsule())
+                            .position(x: frame.midX, y: frame.minY - 28)
+                    }
 
                     Text(template.hint)
                         .font(.footnote)
@@ -77,6 +100,21 @@ struct TemplateCameraView: View {
                 .padding(.top, 8)
 
                 Spacer()
+
+                HStack {
+                    Spacer()
+                    if camera.zoomFactor > 1.05 {
+                        Button("1×") { camera.resetZoom() }
+                            .font(.footnote.weight(.semibold))
+                            .tint(.yellow)
+                            .accessibilityIdentifier("reset-zoom")
+                        Spacer()
+                    } else {
+                        Spacer()
+                        Spacer()
+                    }
+                }
+                .padding(.bottom, 8)
 
                 shutter
                     .padding(.bottom, 28)

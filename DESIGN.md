@@ -29,7 +29,7 @@
 | M5 穿着记录与反馈 | ⬜ | 表结构已就位，UI 未做 |
 | M6 真机 | ✅ | 已装到「陈出新的iPhone」（iOS 27.0.1）。免费证书，**7 天需重装**，见 `scripts/install-to-device.sh` |
 
-**测试总量：104 个**（96 单测 + 8 UI 端到端），全绿。
+**测试总量：108 个**（99 单测 + 9 UI 端到端），全绿。
 
 ### 已知的坑（都是真机上暴露出来的，改之前先读）
 
@@ -153,10 +153,26 @@ pinch m=3.68 a=0.05,0.05 s=7.109 off=27,27  ← 第二次更靠左上
 `AVCaptureSession`（`CameraPreview` + `CameraController`）——两条路并存，
 用户按需要选。
 
+模板相机支持**双指变焦**（`AVCaptureDevice.videoZoomFactor`，上限 6 倍，
+放大时框上方显示倍数、点一下「1×」复位）。系统相机本身自带变焦，所以两种模式都有。
+
 ⚠️ 一个容易错的点：预览是 `resizeAspectFill`（相机 4:3、屏幕 9:19.5），
 屏幕上的框**不能**直接当照片比例用，否则裁出来是长方形。
 换算见 `GarmentTemplate.normalizedCropRect(photoSize:previewSize:frameRect:)`，
 单测专门守「不同长宽比下裁出来仍是正方形」。
+
+### 自动去背景
+
+录入时用 Vision 的 `VNGenerateForegroundInstanceMaskRequest`（iOS 17+）抠主体、
+合成到白底，**全本地运行、免费、不联网**。设置里有开关，默认开启。
+
+几个取舍：
+
+- **失败就保留原图**：识别不出主体（纯色、多件挤一起）时返回 nil，绝不返回坏图
+- **白底而非透明**：衣柜和搭配都是方形卡片，白底更像商品图也更统一
+- **对相册照片也会生效**：如果某张照片是全身对镜拍、不该抠，在设置里关掉开关即可
+- ⚠️ **模拟器跑不了**：Vision 推理需要真机（报 `Could not create inference context`），
+  所以这个功能只能在真机上验证；模拟器上永远走「保留原图」的兜底
 
 ### 已定但未做（下轮候选）
 

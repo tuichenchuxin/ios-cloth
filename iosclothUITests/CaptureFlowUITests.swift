@@ -352,3 +352,19 @@ final class OutfitBuilderUITests: XCTestCase {
         )
     }
 }
+
+/// 设置项：拍照后自动去背景（默认开启）
+final class SettingsUITests: XCTestCase {
+
+    func testAutoRemoveBackgroundDefaultsOn() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-uitest-reset-data"]
+        app.launch()
+
+        app.tabBars.buttons["设置"].firstMatch.tap()
+
+        let toggle = app.switches["auto-remove-background"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "设置里应该有「拍照后自动去背景」")
+        XCTAssertEqual(toggle.value as? String, "1", "默认应该开启")
+    }
+}

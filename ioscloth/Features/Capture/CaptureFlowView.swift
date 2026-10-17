@@ -59,6 +59,11 @@ struct CaptureFlowView: View {
     @State private var cameraUnavailableAlert = false
     /// 当前选的拍照模板（模板拍照用蒙层，自由拍照走系统相机）
     @State private var template: GarmentTemplate = .top
+    /// 是否正在去背景
+    @State private var isProcessing = false
+    /// 拍完（或选完）是否自动去背景，默认开启
+    @AppStorage(AppSettings.autoRemoveBackgroundKey)
+    private var autoRemoveBackground = AppSettings.autoRemoveBackgroundDefault
 
     var body: some View {
         Group {
@@ -73,6 +78,21 @@ struct CaptureFlowView: View {
                 libraryPickerScreen
             case .form:
                 formScreen
+            }
+        }
+        .overlay {
+            if isProcessing {
+                ZStack {
+                    Color.black.opacity(0.35).ignoresSafeArea()
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("正在去背景…")
+                            .font(.footnote)
+                    }
+                    .padding(22)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                }
+                .accessibilityIdentifier("processing")
             }
         }
         .alert("这台设备没有可用的相机", isPresented: $cameraUnavailableAlert) {
@@ -245,8 +265,7 @@ struct CaptureFlowView: View {
         TemplateCameraView(
             template: template,
             onCapture: { image in
-                captured = image
-                enter(.form)
+                handleCaptured(image)
             },
             onCancel: { enter(.idle) }
         )
@@ -263,9 +282,29 @@ struct CaptureFlowView: View {
     /// 系统裁剪已经完成，直接进表单
     private func handlePicked(_ image: UIImage) {
         guard scene.isModal else { return }
-        captured = image
-        // 从「picker 模态」切到「表单模态」，需要等前者收干净
-        enter(.form)
+        handleCaptured(image)
+    }
+
+    /// 拍好/选好的图统一在这里处理：先收起相机（否则进度提示会被盖住），
+    /// 再按设置决定要不要自动去背景，最后进表单。
+    ///
+    /// 去背景失败会退回原图 —— 宁可不去背景，也不要给一张坏图。
+    private func handleCaptured(_ image: UIImage) {
+        scene = .idle
+
+        guard autoRemoveBackground else {
+            captured = image
+            enter(.form)
+            return
+        }
+
+        isProcessing = true
+        Task { @MainActor in
+            let result = await BackgroundRemover.subjectOnWhite(image)
+            isProcessing = false
+            captured = result ?? image
+            enter(.form)
+        }
     }
 
     // MARK: - 表单（自己是一个模态，不自己关闭）

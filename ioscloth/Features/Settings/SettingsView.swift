@@ -9,6 +9,8 @@ struct SettingsView: View {
     @State private var statusMessage: String?
     @State private var showDeleteConfirm = false
     @State private var isImporting = false
+    /// 拍照/选图后是否自动去背景，默认开启
+    @AppStorage(AppSettings.autoRemoveBackgroundKey) private var autoRemoveBackground = true
 
     var body: some View {
         NavigationStack {
@@ -49,6 +51,20 @@ struct SettingsView: View {
                     Text("备份")
                 } footer: {
                     Text("图片不进 JSON（体积太大），但会在 iTunes / Finder 备份里一起保留。导入按 id 去重合并，不会覆盖已有数据。")
+                }
+
+                Section {
+                    Toggle(isOn: $autoRemoveBackground) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("拍照后自动去背景")
+                            Text("用系统的主体识别把衣服抠出来放到白底上；识别不出来就保留原图。全部在本机处理，不联网。")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("auto-remove-background")
+                } header: {
+                    Text("录入")
                 }
 
                 Section {
