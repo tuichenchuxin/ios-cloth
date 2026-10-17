@@ -12,6 +12,7 @@ struct IosClothApp: App {
         do {
             let container = try ModelContainer(for: schema, configurations: [configuration])
             resetIfRequested(container)
+            seedIfRequested(container)
             return container
         } catch {
             fatalError("无法创建 ModelContainer: \(error)")
@@ -28,6 +29,14 @@ struct IosClothApp: App {
         let arguments = ProcessInfo.processInfo.arguments
         guard arguments.contains("-uitest-reset-data") else { return }
         try? BackupService.deleteEverything(in: container.mainContext)
+    }
+
+    /// UI 测试需要一批现成的衣服（否则每条测试都要先慢速录入三件）。
+    /// 只在测试显式传参时灌数据，正常使用永远不会触发。
+    @MainActor
+    private static func seedIfRequested(_ container: ModelContainer) {
+        guard ProcessInfo.processInfo.arguments.contains("-uitest-seed-wardrobe") else { return }
+        PreviewData.seed(container.mainContext)
     }
 
     var body: some Scene {

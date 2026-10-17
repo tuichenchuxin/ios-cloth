@@ -233,3 +233,73 @@ final class CaptureFlowUITests: XCTestCase {
         button.tap()
     }
 }
+
+/// 「自己搭一套」的端到端测试。
+///
+/// 这是 App 的主要功能，所以单独一个测试类：
+/// 从衣柜里挑上装 + 下装，保存，然后能在「我的搭配」里看到。
+final class OutfitBuilderUITests: XCTestCase {
+
+    private func launchWithSampleWardrobe() -> XCUIApplication {
+        let app = XCUIApplication()
+        // 灌一批样例衣服，省掉每次慢速录入
+        app.launchArguments += ["-uitest-reset-data", "-uitest-seed-wardrobe"]
+        app.launch()
+        return app
+    }
+
+    func testBuildOutfitManuallyAndSave() throws {
+        let app = launchWithSampleWardrobe()
+
+        app.tabBars.buttons["搭配"].firstMatch.tap()
+
+        let buildButton = app.buttons["自己搭一套"].firstMatch
+        XCTAssertTrue(buildButton.waitForExistence(timeout: 10), "「自己搭一套」必须出现在搭配页顶部")
+        buildButton.tap()
+
+        // 上装
+        let topSlot = app.buttons["slot-top"].firstMatch
+        XCTAssertTrue(topSlot.waitForExistence(timeout: 10), "应该有「上装」一行")
+        topSlot.tap()
+        let shirt = app.buttons["candidate-白色衬衫"].firstMatch
+        XCTAssertTrue(shirt.waitForExistence(timeout: 10), "候选里应该有白色衬衫")
+        shirt.tap()
+
+        // 下装
+        let bottomSlot = app.buttons["slot-bottom"].firstMatch
+        XCTAssertTrue(bottomSlot.waitForExistence(timeout: 10))
+        bottomSlot.tap()
+        let pants = app.buttons["candidate-灰色阔腿裤"].firstMatch
+        XCTAssertTrue(pants.waitForExistence(timeout: 10))
+        pants.tap()
+
+        // 保存
+        let saveButton = app.buttons["保存"].firstMatch
+        XCTAssertTrue(saveButton.isEnabled, "上下装都选好之后应该能保存")
+        saveButton.tap()
+
+        // 在「我的搭配」里能看到
+        app.tabBars.buttons["我的搭配"].firstMatch.tap()
+        let saved = app.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS '白色衬衫'")
+        ).firstMatch
+        XCTAssertTrue(saved.waitForExistence(timeout: 15), "保存的搭配应该出现在「我的搭配」里")
+    }
+
+    /// 只选上装时不能保存，并且要有明确的「还差什么」提示
+    func testIncompleteOutfitCannotBeSaved() throws {
+        let app = launchWithSampleWardrobe()
+
+        app.tabBars.buttons["搭配"].firstMatch.tap()
+        app.buttons["自己搭一套"].firstMatch.tap()
+
+        app.buttons["slot-top"].firstMatch.tap()
+        app.buttons["candidate-白色衬衫"].firstMatch.tap()
+
+        XCTAssertFalse(app.buttons["保存"].firstMatch.isEnabled, "缺下装时不该能保存")
+        XCTAssertTrue(
+            app.staticTexts.containing(NSPredicate(format: "label CONTAINS '还差'")).firstMatch.exists,
+            "应该提示还差什么"
+        )
+    }
+}

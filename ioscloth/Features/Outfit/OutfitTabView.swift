@@ -13,6 +13,8 @@ struct OutfitTabView: View {
     @State private var styles: [StyleTag] = [.commute, .casual]
     @State private var drafts: [OutfitDraft<Clothing>] = []
     @State private var savedMessage: String?
+    /// 自己搭一套
+    @State private var isBuilding = false
 
     var body: some View {
         NavigationStack {
@@ -22,6 +24,8 @@ struct OutfitTabView: View {
                     if wearingItems.isEmpty {
                         emptyState
                     } else {
+                        buildCTA
+                        recommendationHeader
                         results
                     }
                 }
@@ -40,6 +44,9 @@ struct OutfitTabView: View {
                         .padding(.top, 8)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
+            }
+            .sheet(isPresented: $isBuilding) {
+                OutfitBuilderView(temperature: temperature, season: season)
             }
             .onChange(of: temperature) { _, _ in generate() }
             .onChange(of: season) { _, _ in generate() }
@@ -97,6 +104,53 @@ struct OutfitTabView: View {
         }
         .padding(14)
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: - 自己搭一套（主功能）
+
+    /// 主入口：自己挑衣服配一套。
+    ///
+    /// 刻意做成整块大卡片而不是普通按钮 —— 「自己搭」是这个 App 最主要的用法，
+    /// 随机推荐只是「不知道穿什么」时的辅助。
+    private var buildCTA: some View {
+        Button {
+            isBuilding = true
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: "square.grid.2x2.fill")
+                    .font(.title2)
+                    .foregroundStyle(Color.accentColor)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("自己搭一套")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Text("从衣柜里挑上装、下装、鞋…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(16)
+            .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("自己搭一套")
+    }
+
+    private var recommendationHeader: some View {
+        HStack {
+            Text("不知道穿什么？让我推荐")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.top, 4)
     }
 
     // MARK: - 结果
