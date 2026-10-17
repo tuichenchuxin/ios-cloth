@@ -31,7 +31,8 @@ struct TemplateCameraView: View {
                 .gesture(
                     MagnifyGesture()
                         .onChanged { value in
-                            let base = zoomBase ?? camera.zoomFactor
+                            // 起点用「实际值」而不是显示值：显示值是节流过的，滞后会跳
+                            let base = zoomBase ?? camera.currentZoom
                             if zoomBase == nil { zoomBase = base }
                             camera.setZoom(base * value.magnification)
                         }
@@ -62,8 +63,8 @@ struct TemplateCameraView: View {
                         .frame(width: frame.width, height: frame.height)
 
                     // 变焦倍数提示（只在放大时出现）
-                    if camera.zoomFactor > 1.05 {
-                        Text(String(format: "%.1f×", camera.zoomFactor))
+                    if abs(camera.displayedZoom - 1) > 0.05 {
+                        Text(String(format: "%.1f×", camera.displayedZoom))
                             .font(.caption.monospacedDigit().weight(.medium))
                             .foregroundStyle(.yellow)
                             .padding(.horizontal, 10)
@@ -103,7 +104,7 @@ struct TemplateCameraView: View {
 
                 HStack {
                     Spacer()
-                    if camera.zoomFactor > 1.05 {
+                    if abs(camera.displayedZoom - 1) > 0.05 {
                         Button("1×") { camera.resetZoom() }
                             .font(.footnote.weight(.semibold))
                             .tint(.yellow)
