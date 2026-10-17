@@ -1,50 +1,48 @@
 import SwiftUI
 import SwiftData
 import UIKit
-import PhotosUI
 
-/// 录入流程的调度器：**入口页 → 拍照/相册 → 裁切 → 表单 →（批量）回到上一个来源**。
+/// 录入流程的调度器：**入口页 → 拍照/选图（含系统裁剪）→ 填表 →（批量）回到同一来源**。
 ///
 /// 这是整个 App 最重要的一条路径（DESIGN.md §5.2）。
 /// 衡量它好坏的唯一标准是：同一季的衣服连拍 20 件要多久。
-/// 所以每一步都把「不用做决定」当作设计目标：
-/// - 相机 / 相册两个大按钮，不用先理解别的概念
-/// - 裁切框打开就居中填满，直接点「完成」就行
-/// - 表单的季节/温度/场景继承上一件，只需按「保存并继续」
-/// - 「保存并继续」回到**你刚才用的那个来源**（拍照来的回相机，相册来的回相册）
 ///
-/// ## 三条必须守住的规则（改之前务必先读，每条都对应一个线上 bug）
+/// 裁剪交给系统组件 `SystemImagePicker`（`allowsEditing = true`），
+/// 不再自己实现裁切页 —— 见那个文件顶部的说明。
+///
+/// ## 两条必须守住的规则（改之前务必先读，每条都对应一个真实的 bug）
 ///
 /// **1. 任何子视图都不许自己关闭自己。**
 ///    关闭一律由本视图改 `scene` 完成，子视图只回调。
-///    之前 `ClothingEditView` 和 `CameraPicker` 各自调 `dismiss()`，结果
-///    sheet 的绑定和真实状态对不上 —— 按钮点了没反应，只有手动下滑才关得掉。
+///    之前让 sheet / picker 各自 `dismiss()`，导致呈现状态和真实状态对不上 ——
+///    按钮点了没反应，只有手动下滑才关得掉，而数据其实早就保存了。
 ///
-/// **2. 只有在「模态 → 模态」时才需要等关闭动画；其余切换要同步完成。**
-///    在同一次状态更新里既关 sheet 又开 cover，SwiftUI 会把两者一起丢掉
-///    （表现为「点了使用照片什么都没发生」）。但**绝不能**给所有切换都加延时，
-///    否则会出现「延时的二次状态变更把刚建好的页面拆掉」——
-///    裁切页刚弹出就消失就是这么来的。
-///
-/// **3. 状态切换不能有「被丢弃就永久卡死」的守卫。**
-///    之前 `enter()` 里的 `guard nextScene == nil else { return }` 一旦命中一次，
-///    后面所有点击都静默失效。
+/// **2. 模态之间直接切换时，必须等前一个收干净。**
+///    同一次状态更新里既关 sheet 又开 cover，SwiftUI 会把两者一起丢掉。
+///    所以 `enter(_:)` 先卸载当前模态，等 400ms 动画走完，再进目标模态。
 struct CaptureFlowView: View {
     /// 流程结束
     let onFinish: () -> Void
 
-    /// 当前场景。用**单选**状态机表达，避免多个布尔量互相矛盾。
     private enum Scene: Equatable {
         case idle
         case camera
-        case cropping
+        case photoLibrary
         case form
+
+        /// 是否是一个「全屏/半屏模态」
+        var isModal: Bool {
+            switch self {
+            case .camera, .photoLibrary, .form: true
+            case .idle: false
+            }
+        }
     }
 
-    /// 连续录入时，「保存并继续」要回到哪个来源
-    private enum CaptureSource {
+    /// 这一轮从哪来，决定「保存并继续」回哪里
+    private enum Source {
         case camera
-        case library
+        case photoLibrary
     }
 
     @State private var scene: Scene = .idle
@@ -53,11 +51,8 @@ struct CaptureFlowView: View {
     @State private var recordedCount = 0
     /// 下一件要继承的字段
     @State private var seed = ClothingEditView.Draft()
-    /// 这一轮是从哪来的，决定「保存并继续」回哪里
-    @State private var source: CaptureSource = .camera
-
-    @State private var isPickingFromLibrary = false
-    @State private var libraryItem: PhotosPickerItem?
+    /// 这一轮的来源
+    @State private var source: Source = .camera
     @State private var cameraUnavailableAlert = false
 
     var body: some View {
@@ -66,17 +61,12 @@ struct CaptureFlowView: View {
             case .idle:
                 entryScreen
             case .camera:
-                cameraScreen
-            case .cropping:
-                croppingScreen
+                cameraPickerScreen
+            case .photoLibrary:
+                libraryPickerScreen
             case .form:
                 formScreen
             }
-        }
-        .photosPicker(isPresented: $isPickingFromLibrary, selection: $libraryItem, matching: .images)
-        .onChange(of: libraryItem) { _, newValue in
-            guard let newValue else { return }
-            Task { await handleLibraryPick(newValue) }
         }
         .alert("这台设备没有可用的相机", isPresented: $cameraUnavailableAlert) {
             Button("好", role: .cancel) {}
@@ -87,15 +77,15 @@ struct CaptureFlowView: View {
 
     // MARK: - 场景切换
 
-    /// 关闭当前模态，必要时等它收干净，再打开目标场景。
+    /// 卸载当前模态，必要时等它收干净，再进入目标场景。
     ///
-    /// 只有 `.cropping → .form`（两个都是模态）需要等：同一次更新里关一个开一个，
-    /// SwiftUI 会把两者一起丢掉。
+    /// 只有「模态 → 模态」需要等：同一次更新里既关一个又开一个，
+    /// SwiftUI 会把两者一起丢掉（表现为点击没反应或流程直接退出）。
     ///
     /// 这里**故意没有**「已经在切换中就忽略」的守卫 —— 那种守卫一旦命中就永久卡死。
-    /// 重复调用是无害的：就是重新设一次目标场景。
+    /// 重复调用是无害的，就是重新设一次目标场景。
     private func enter(_ target: Scene) {
-        let needsWait = (scene == .cropping && target == .form)
+        let needsWait = scene.isModal && target.isModal
         scene = .idle
         if target != .form { captured = nil }
 
@@ -110,12 +100,7 @@ struct CaptureFlowView: View {
         }
     }
 
-    /// 结束整个录入流程。
-    ///
-    /// **必须等当前模态收干净**，不能直接 `onFinish()`：外层还有一个
-    /// `fullScreenCover`，同时关「内层 sheet」和「外层 cover」会让 SwiftUI
-    /// 把两者一起丢掉（表现为流程没退出去、或者界面错乱）。
-    /// 这和 `enter(_:)` 里那个 400ms 是同一个道理。
+    /// 结束整个录入流程：先让当前模态收干净，再关外层
     private func finishFlow() {
         scene = .idle
         captured = nil
@@ -148,7 +133,7 @@ struct CaptureFlowView: View {
                         .foregroundStyle(.tertiary)
                     Text(recordedCount > 0 ? "继续录下一件" : "开始录入衣物")
                         .font(.title3.weight(.medium))
-                    Text("同一季的衣服连着拍，季节和温度会自动沿用上一件。")
+                    Text("拍完后可以用系统裁剪把衣服抠成正方形，圈身和温度会自动沿用上一件。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -176,7 +161,7 @@ struct CaptureFlowView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.large)
 
-                    if !CameraPicker.isAvailable {
+                    if !SystemImagePicker.isCameraAvailable {
                         Text("模拟器没有相机，请用「从相册选」。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -195,10 +180,8 @@ struct CaptureFlowView: View {
         }
     }
 
-    // MARK: - 入口动作
-
     private func startCamera() {
-        guard CameraPicker.isAvailable else {
+        guard SystemImagePicker.isCameraAvailable else {
             cameraUnavailableAlert = true
             return
         }
@@ -208,46 +191,36 @@ struct CaptureFlowView: View {
     }
 
     private func startLibrary() {
-        source = .library
+        source = .photoLibrary
         captured = nil
-        scene = .idle
-        isPickingFromLibrary = true
+        scene = .photoLibrary
     }
 
-    // MARK: - 相机（自己是一个全屏模态，不自己关闭）
+    // MARK: - 系统拍照 / 选图（内部自带裁剪）
 
-    private var cameraScreen: some View {
-        CameraPicker(
-            onCapture: { image in
-                // 同一个回调可能因为系统行为被触发两次，第二次会带着已经变过的
-                // scene 进来。加个守卫避免把裁切页刚建好又拆掉。
-                guard scene == .camera else { return }
-                captured = image
-                scene = .cropping
-            },
+    private var cameraPickerScreen: some View {
+        SystemImagePicker(
+            source: .camera,
+            onPicked: handlePicked,
             onCancel: { enter(.idle) }
         )
         .ignoresSafeArea()
     }
 
-    // MARK: - 裁切
+    private var libraryPickerScreen: some View {
+        SystemImagePicker(
+            source: .photoLibrary,
+            onPicked: handlePicked,
+            onCancel: { enter(.idle) }
+        )
+    }
 
-    @ViewBuilder
-    private var croppingScreen: some View {
-        if let captured {
-            NavigationStack {
-                ImageCropper(
-                    image: captured,
-                    onDone: { cropped in
-                        self.captured = cropped
-                        enter(.form)
-                    },
-                    onCancel: { enter(.idle) }
-                )
-            }
-        } else {
-            Color.clear.onAppear { enter(.idle) }
-        }
+    /// 系统裁剪已经完成，直接进表单
+    private func handlePicked(_ image: UIImage) {
+        guard scene.isModal else { return }
+        captured = image
+        // 从「picker 模态」切到「表单模态」，需要等前者收干净
+        enter(.form)
     }
 
     // MARK: - 表单（自己是一个模态，不自己关闭）
@@ -264,10 +237,9 @@ struct CaptureFlowView: View {
                         // 回到刚才用的那个来源，而不是一律回相机
                         switch source {
                         case .camera: startCamera()
-                        case .library: startLibrary()
+                        case .photoLibrary: startLibrary()
                         }
                     } else {
-                        // 「保存并结束」= 退出整个录入流程（不是回到入口页）
                         finishFlow()
                     }
                 },
@@ -276,16 +248,5 @@ struct CaptureFlowView: View {
         } else {
             Color.clear.onAppear { enter(.idle) }
         }
-    }
-
-    // MARK: - 相册
-
-    private func handleLibraryPick(_ item: PhotosPickerItem) async {
-        defer { libraryItem = nil }
-        guard let data = try? await item.loadTransferable(type: Data.self),
-              let image = UIImage(data: data) else { return }
-        guard scene == .idle else { return }
-        captured = image
-        scene = .cropping
     }
 }

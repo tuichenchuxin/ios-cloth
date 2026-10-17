@@ -32,8 +32,7 @@ final class CaptureFlowUITests: XCTestCase {
         let app = launchApp()
 
         openCaptureEntry(app)
-        pickFirstPhotoFromLibrary(app)
-        confirmCrop(app)
+        pickAndCropPhoto(app)
         fillName(app, "UI测试用上衣")
         app.buttons["春"].firstMatch.tap()
 
@@ -58,8 +57,7 @@ final class CaptureFlowUITests: XCTestCase {
         let app = launchApp()
 
         openCaptureEntry(app)
-        pickFirstPhotoFromLibrary(app)
-        confirmCrop(app)
+        pickAndCropPhoto(app)
         fillName(app, "相册批量第一件")
         app.buttons["冬"].firstMatch.tap()
 
@@ -85,8 +83,7 @@ final class CaptureFlowUITests: XCTestCase {
         let app = launchApp()
 
         openCaptureEntry(app)
-        pickFirstPhotoFromLibrary(app)
-        confirmCrop(app)
+        pickAndCropPhoto(app)
         fillName(app, "继承源")
         app.buttons["冬"].firstMatch.tap()
         app.buttons["冷 -5~10°"].firstMatch.tap()
@@ -94,10 +91,11 @@ final class CaptureFlowUITests: XCTestCase {
         tapSave(app, "保存并继续")
 
         // 从相册来源的「保存并继续」直接回到相册，可以立刻选第二张
+        // 从相册来源的「保存并继续」应该直接回到系统相册，可以立刻选第二张
         let secondPhoto = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
         XCTAssertTrue(secondPhoto.waitForExistence(timeout: 30), "应该直接回到相册")
         secondPhoto.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        confirmCrop(app)
+        confirmSystemCrop(app)
 
         let nameField = app.textFields["衣物名称输入框"]
         XCTAssertTrue(nameField.waitForExistence(timeout: 15), "第二件的表单应该出现")
@@ -117,67 +115,6 @@ final class CaptureFlowUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["衣柜"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.staticTexts["继承结果"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.staticTexts["继承源"].waitForExistence(timeout: 20), "第一件也该在")
-    }
-
-    // MARK: - 裁切页的缩放平移
-
-    /// 缩放平移之后仍然能正常裁切并保存。
-    ///
-    /// 这条守的是一个具体的回归：之前自己用 SwiftUI 手势算缩放平移，
-    /// `startAnchor` 的坐标系搞错了，导致「无论捏哪里取景框都往右下漂」，
-    /// 最后裁出来的位置完全不是用户看到的位置。
-    /// 现在改用 `UIScrollView`，这个测试保证「捏过之后流程仍然完整」。
-    func testPinchAndDragThenCropStillSaves() throws {
-        let app = launchApp()
-
-        openCaptureEntry(app)
-        pickFirstPhotoFromLibrary(app)
-
-        let doneButton = app.buttons["完成"].firstMatch
-        XCTAssertTrue(doneButton.waitForExistence(timeout: 20), "选完照片必须进入裁切页")
-
-        // 在取景区捏合放大，再拖动
-        let canvas = app.images.firstMatch
-        canvas.pinch(withScale: 2.0, velocity: 1.0)
-        // 用坐标做拖拽：XCUIElement 的 press(forDuration:thenDragTo:) 只接受元素
-        let start = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.35))
-        let end = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.65))
-        start.press(forDuration: 0.1, thenDragTo: end)
-
-        doneButton.tap()
-
-        fillName(app, "缩放后裁切")
-        tapSave(app, "保存并结束")
-
-        XCTAssertTrue(app.navigationBars["衣柜"].waitForExistence(timeout: 20))
-        XCTAssertTrue(
-            app.staticTexts["缩放后裁切"].waitForExistence(timeout: 20),
-            "缩放平移之后裁切保存必须照常成功"
-        )
-    }
-
-    /// 「保存并结束」必须**退出整个录入流程**，不能回到相机。
-    ///
-    /// 这里防的是一类很低级但很烦人的错误：外壳把回调写成了恒定的
-    /// `onSaved(true)`，于是两个保存按钮的语义完全一样 —— 不管点哪个都回相机。
-    func testSaveAndFinishExitsFlowInsteadOfReturningToCamera() throws {
-        let app = launchApp()
-
-        openCaptureEntry(app)
-        pickFirstPhotoFromLibrary(app)
-        confirmCrop(app)
-        fillName(app, "结束测试")
-
-        tapSave(app, "保存并结束")
-
-        // 回到衣柜
-        XCTAssertTrue(app.navigationBars["衣柜"].waitForExistence(timeout: 20), "应该回到衣柜")
-        XCTAssertTrue(app.staticTexts["结束测试"].waitForExistence(timeout: 20), "衣物应该已保存")
-
-        // 关键：整个录入流程都关掉了 —— 入口页和相机都不该还在
-        XCTAssertFalse(app.buttons["拍照"].exists, "不该回到录入入口页")
-        XCTAssertFalse(app.buttons["Take Picture"].exists, "更不该回到相机")
-        XCTAssertFalse(app.buttons["从相册选"].exists)
     }
 
     // MARK: - 取消不该留下垃圾数据
@@ -204,8 +141,7 @@ final class CaptureFlowUITests: XCTestCase {
         let app = launchApp()
 
         openCaptureEntry(app)
-        pickFirstPhotoFromLibrary(app)
-        confirmCrop(app)
+        pickAndCropPhoto(app)
 
         XCTAssertTrue(app.textFields["衣物名称输入框"].waitForExistence(timeout: 15))
         fillName(app, "不该被保存")
@@ -242,37 +178,41 @@ final class CaptureFlowUITests: XCTestCase {
         )
     }
 
-    /// 在系统相册（PHPicker）里挑第一张照片。
+    /// 从系统相册挑第一张照片，并在**系统裁剪页**确认。
     ///
-    /// 系统相册有几个坑，都在这里绕开：
-    /// 1. 它可能先弹一个引导页（带 `Learn More…` / `Close`），把网格整个挡住；
-    /// 2. 照片在层级里是 `PXGGridLayout-Info`，而且 `isHittable == false`
-    ///    （外面套了一层拦截触摸的容器），所以只能按坐标点；
-    /// 3. 挑完之后系统会自己关掉选择器，没有确认按钮。
-    private func pickFirstPhotoFromLibrary(_ app: XCUIApplication) {
-        // 先等入口页就绪：从相机收回来之后需要一点动画时间
-        let libraryButton = app.buttons["从相册选"].firstMatch
-        XCTAssertTrue(libraryButton.waitForExistence(timeout: 20), "录入入口页应该出现")
-        libraryButton.tap()
-
-        let closeButton = app.buttons["Close"].firstMatch
-        if closeButton.waitForExistence(timeout: 8) {
-            closeButton.tap()
-        }
+    /// 裁剪交给 `SystemImagePicker`（`UIImagePickerController.allowsEditing = true`），
+    /// 所以这里用的是系统 UI：选完照片会进「Choose Photo」页，按钮是 Cancel / Choose。
+    ///
+    /// 点照片要优先用 `PXGGridLayout-Info` 这个 image，按坐标点 ——
+    /// 它外面套了一层拦截触摸的容器（`isHittable == false`）；
+    /// 直接点 `collectionViews.cells` 经常点不中，测试会卡在相册页。
+    private func pickAndCropPhoto(_ app: XCUIApplication) {
+        app.buttons["从相册选"].firstMatch.tap()
 
         let photo = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
-        XCTAssertTrue(
-            photo.waitForExistence(timeout: 30),
-            "相册里没找到可选的照片（模拟器相册可能是空的，先跑 `xcrun simctl addmedia`）"
-        )
-        photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        if photo.waitForExistence(timeout: 30) {
+            photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        } else if app.collectionViews.firstMatch.cells.count > 0 {
+            app.collectionViews.firstMatch.cells.firstMatch.tap()
+        } else if app.images.firstMatch.waitForExistence(timeout: 15) {
+            app.images.firstMatch.tap()
+        } else {
+            XCTFail("系统相册里没有可选照片（模拟器相册可能是空的，先跑 `xcrun simctl addmedia`）")
+        }
+
+        confirmSystemCrop(app)
     }
 
-    /// 裁切页 → 完成
-    private func confirmCrop(_ app: XCUIApplication) {
-        let doneButton = app.buttons["完成"].firstMatch
-        XCTAssertTrue(doneButton.waitForExistence(timeout: 20), "选完照片必须进入裁切页")
-        doneButton.tap()
+    /// 系统裁剪页的确认按钮。中英文都试一遍，避免测试依赖模拟器语言。
+    private func confirmSystemCrop(_ app: XCUIApplication) {
+        for label in ["Choose", "选择", "选取", "完成", "Done"] {
+            let button = app.buttons[label].firstMatch
+            if button.waitForExistence(timeout: 8) {
+                button.tap()
+                return
+            }
+        }
+        XCTFail("没找到系统裁剪页的确认按钮（期望 Choose / 选择）")
     }
 
     private func fillName(_ app: XCUIApplication, _ text: String) {

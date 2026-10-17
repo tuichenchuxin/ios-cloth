@@ -69,10 +69,14 @@ actor ImageStore {
         let mainName = "\(base).jpg"
         let thumbName = "\(base).jpg"
 
-        guard let mainData = image.resized(maxDimension: mainMaxDimension).jpegData(quality: mainQuality) else {
+        // 先把方向拍平再缩放：带 orientation 标记的图如果直接按 size 缩放会算出错的尺寸
+        // （相机原图、以及从相册选的原图都可能带方向标记）
+        let normalized = image.upright()
+
+        guard let mainData = normalized.resized(maxDimension: mainMaxDimension).jpegData(quality: mainQuality) else {
             throw ImageStoreError.encodingFailed
         }
-        let thumbData = image.resized(maxDimension: thumbMaxDimension).jpegData(quality: thumbQuality) ?? mainData
+        let thumbData = normalized.resized(maxDimension: thumbMaxDimension).jpegData(quality: thumbQuality) ?? mainData
 
         try mainData.write(to: mainDirectory.appendingPathComponent(mainName), options: .atomic)
         try thumbData.write(to: thumbDirectory.appendingPathComponent(thumbName), options: .atomic)
