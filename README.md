@@ -74,11 +74,26 @@ xcodebuild test -project ioscloth.xcodeproj -scheme ioscloth \
 
 ## 装到真机（7 天一次）
 
-用的是免费 Personal Team 证书（`M7GUVHHD97`），**装到真机上只能撑 7 天**，到期 App 打不开，重跑脚本即可：
+用的是免费 Personal Team 证书（`M7GUVHHD97`），**装到真机上只能撑 7 天**。到期后手机上 App 直接打不开（不是崩溃，是签名失效）。
+
+**一条命令装全部自用 App**（衣橱 + RSSReader）：
 
 ```bash
-./scripts/install-to-device.sh
+./scripts/renew-all-apps.sh
 ```
+
+只装本 App：`./scripts/install-to-device.sh`
+
+### 如果报 `No Accounts` / `No profiles`
+
+说明 Xcode 里的 Apple ID 登录态丢了，**重建证书必须人工登录**（要密码 + 双重验证）：
+
+1. 打开 Xcode → `Settings…`（⌘,）→ `Accounts`
+2. 点左下角 `+` → `Apple ID` → 登录 `你的AppleID@example.com`
+3. 再跑上面的脚本
+
+> 诊断方法：`defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDLists`
+> 如果输出是 `{ "IDE.Identifiers.Prod" = (); }`（空列表），就是这个原因。
 
 前提：手机连上 Mac、解锁、信任过这台电脑。免费账号还有两个限制：
 - 同时最多装 3 个 App（你的 RSSReader 已占 1 个）；
