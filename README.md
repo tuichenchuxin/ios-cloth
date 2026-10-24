@@ -95,6 +95,14 @@ xcodebuild test -project ioscloth.xcodeproj -scheme ioscloth \
 > 诊断方法：`defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDLists`
 > 如果输出是 `{ "IDE.Identifiers.Prod" = (); }`（空列表），就是这个原因。
 
+### 如果装完却打不开（提示需要信任）
+
+重建 profile 后，手机上要**重新信任一次**开发者证书：
+
+设置 → 通用 → VPN 与设备管理 → 开发者 App → 选「Apple Development: 你的AppleID@example.com」→ 信任
+
+信任一次即可，不需要重装。
+
 前提：手机连上 Mac、解锁、信任过这台电脑。免费账号还有两个限制：
 - 同时最多装 3 个 App（你的 RSSReader 已占 1 个）；
 - 换手机/重装系统后要重新配对。

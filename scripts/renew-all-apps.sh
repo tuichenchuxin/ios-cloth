@@ -91,16 +91,33 @@ install_app "RSSReader" \
 
 echo
 echo "=== 启动 ==="
+NEEDS_TRUST=0
 if [ ${#BUNDLE_IDS[@]} -eq 0 ]; then
   echo "（没有成功安装的 App，跳过启动）"
 else
 for bundle in "${BUNDLE_IDS[@]}"; do
-  if xcrun devicectl device process launch --device "$DEVICE_ID" "$bundle" 2>&1 | grep -q "Locked"; then
-    echo "   $bundle：手机锁屏，解锁后手动点开"
-  else
+  output=$(xcrun devicectl device process launch --device "$DEVICE_ID" "$bundle" 2>&1)
+
+  if printf '%s' "$output" | grep -q "not been explicitly trusted"; then
+    echo "   $bundle：已安装，但**需要在手机上信任开发者**"
+    NEEDS_TRUST=1
+  elif printf '%s' "$output" | grep -q "Locked"; then
+    echo "   $bundle：已安装，手机锁屏中，解锁后手动点开"
+  elif printf '%s' "$output" | grep -q "Launched application"; then
     echo "   $bundle：已启动"
+  else
+    echo "   $bundle：启动失败（下面可能有用）："
+    printf '%s\n' "$output" | grep -iE "error|reason" | head -2
   fi
 done
+fi
+
+if [ "$NEEDS_TRUST" = "1" ]; then
+  echo
+  echo "⚠️  手机上需要信任一次开发者证书（重建 profile 后必须重新确认）："
+  echo "   设置 → 通用 → VPN 与设备管理 → 开发者 App"
+  echo "   → 选「Apple Development: 你的AppleID@example.com」→ 信任"
+  echo "   信任后 App 就能正常打开，不需要重装。"
 fi
 
 echo
